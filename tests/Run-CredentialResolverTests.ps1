@@ -111,10 +111,17 @@ finally {
 
 $resolverSource = Get-Content -LiteralPath $resolverSourcePath -Raw -Encoding UTF8
 $settingsSource = Get-Content -LiteralPath $settingsModulePath -Raw -Encoding UTF8
+$credentialModuleSource = Get-Content -LiteralPath $credentialModulePath -Raw -Encoding UTF8
 Assert-True -Condition ($resolverSource -match 'CredReadW' -and $resolverSource -match 'CredFree' -and $resolverSource -notmatch 'CredEnumerate') -Name 'Resolver reads exact credentials and cannot enumerate the vault'
 Assert-True -Condition ($resolverSource -notmatch 'Process\.Start|cmd\.exe|powershell(?:\.exe)?') -Name 'Resolver cannot launch a shell or child process'
 Assert-True -Condition ($resolverSource -match "IndexOf\('\\0'\)") -Name 'Resolver rejects stored secrets containing null characters'
 Assert-True -Condition ($settingsSource -notmatch 'Install-OpenClawCredentialResolver[^\r\n]*-SourcePath') -Name 'Settings engine calls the fixed-source resolver installation contract'
+$ownerNormalizationIndex = $credentialModuleSource.IndexOf('$acl.SetOwner($identity.User)', [StringComparison]::Ordinal)
+$inheritedAclValidationIndex = $credentialModuleSource.IndexOf('if ($unexpectedRule -or -not $hasUserControl -or -not $hasSystemControl)', [StringComparison]::Ordinal)
+$ownerRevalidationIndex = $credentialModuleSource.IndexOf('Assert-OpenClawInheritedPrivateAcl -Path $Path', $ownerNormalizationIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($inheritedAclValidationIndex -ge 0 -and $ownerNormalizationIndex -gt $inheritedAclValidationIndex -and $ownerRevalidationIndex -gt $ownerNormalizationIndex) -Name 'Resolver owner normalization validates inherited access before and after changing the owner'
+$normalizingInstallChecks = [regex]::Matches($credentialModuleSource, 'Assert-OpenClawInheritedPrivateAcl -Path \$(?:resolverDirectory|installLockPath|buildDirectory|compiledPath|destinationPath) -NormalizeOwner').Count
+Assert-True -Condition ($normalizingInstallChecks -eq 6) -Name 'Resolver installation normalizes every generated directory, lock, build, and destination owner'
 
 $testRoot = Join-Path $PSScriptRoot ('.tmp-credential-' + [Guid]::NewGuid().ToString('N'))
 try {

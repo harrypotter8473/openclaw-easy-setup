@@ -526,7 +526,9 @@ function Test-OpenClawChildPath {
 function Assert-OpenClawInheritedPrivateAcl {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [switch]$NormalizeOwner
     )
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -534,37 +536,57 @@ function Assert-OpenClawInheritedPrivateAcl {
     }
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $acl = Get-Acl -LiteralPath $Path
-    $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier])
-    if ($ownerSid.Value -ne $identity.User.Value -or $acl.AreAccessRulesProtected) {
-        throw 'The resolver path does not inherit the private State directory ACL.'
+    try {
+        $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+        $acl = Get-Acl -LiteralPath $Path
+        $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+        if ($acl.AreAccessRulesProtected) {
+            throw 'The resolver path does not inherit the private State directory ACL.'
+        }
+
+        $allowedSids = @($identity.User.Value, $systemSid.Value)
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        if ($rules.Count -eq 0) {
+            throw 'The resolver path has no verifiable inherited access rules.'
+        }
+
+        $unexpectedRule = @($rules | Where-Object {
+            -not $_.IsInherited -or $_.IdentityReference.Value -notin $allowedSids
+        }).Count -gt 0
+        $hasUserControl = @($rules | Where-Object {
+            $_.IsInherited -and
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $_.IdentityReference.Value -eq $identity.User.Value -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl
+        }).Count -gt 0
+        $hasSystemControl = @($rules | Where-Object {
+            $_.IsInherited -and
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $_.IdentityReference.Value -eq $systemSid.Value -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl
+        }).Count -gt 0
+
+        if ($unexpectedRule -or -not $hasUserControl -or -not $hasSystemControl) {
+            throw 'The resolver path ACL is not restricted to the current user and SYSTEM.'
+        }
+
+        if ($ownerSid.Value -ne $identity.User.Value) {
+            if (-not $NormalizeOwner) {
+                throw 'The resolver path does not inherit the private State directory ACL.'
+            }
+
+            # Hosted administrator tokens can assign BUILTIN\Administrators as
+            # the owner of a new child even though its DACL safely inherits from
+            # State. Change only that owner after validating the inherited DACL,
+            # then re-read and verify the complete descriptor.
+            $acl.SetOwner($identity.User)
+            Set-Acl -LiteralPath $Path -AclObject $acl
+            Assert-OpenClawInheritedPrivateAcl -Path $Path
+            return
+        }
     }
-
-    $allowedSids = @($identity.User.Value, $systemSid.Value)
-    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-    if ($rules.Count -eq 0) {
-        throw 'The resolver path has no verifiable inherited access rules.'
-    }
-
-    $unexpectedRule = @($rules | Where-Object {
-        -not $_.IsInherited -or $_.IdentityReference.Value -notin $allowedSids
-    }).Count -gt 0
-    $hasUserControl = @($rules | Where-Object {
-        $_.IsInherited -and
-        $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-        $_.IdentityReference.Value -eq $identity.User.Value -and
-        ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl
-    }).Count -gt 0
-    $hasSystemControl = @($rules | Where-Object {
-        $_.IsInherited -and
-        $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-        $_.IdentityReference.Value -eq $systemSid.Value -and
-        ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl
-    }).Count -gt 0
-
-    if ($unexpectedRule -or -not $hasUserControl -or -not $hasSystemControl) {
-        throw 'The resolver path ACL is not restricted to the current user and SYSTEM.'
+    finally {
+        $identity.Dispose()
     }
 }
 
@@ -738,7 +760,7 @@ function Install-OpenClawCredentialResolver {
         [void][IO.Directory]::CreateDirectory($resolverDirectory)
         [void](Get-OpenClawVerifiedNormalPath -Path $resolverDirectory -Kind Container)
     }
-    Assert-OpenClawInheritedPrivateAcl -Path $resolverDirectory
+    Assert-OpenClawInheritedPrivateAcl -Path $resolverDirectory -NormalizeOwner
 
     $destinationPath = [IO.Path]::GetFullPath((Join-Path $resolverDirectory 'OpenClawEasySetup.SecretResolver.exe'))
     if (-not (Test-OpenClawChildPath -Parent $resolverDirectory -Child $destinationPath)) {
@@ -760,12 +782,12 @@ function Install-OpenClawCredentialResolver {
             1,
             [IO.FileOptions]::DeleteOnClose
         )
-        Assert-OpenClawInheritedPrivateAcl -Path $installLockPath
+        Assert-OpenClawInheritedPrivateAcl -Path $installLockPath -NormalizeOwner
 
         $buildDirectory = Join-Path $resolverDirectory ('.build-' + [Guid]::NewGuid().ToString('N'))
         [void][IO.Directory]::CreateDirectory($buildDirectory)
         [void](Get-OpenClawVerifiedNormalPath -Path $buildDirectory -Kind Container)
-        Assert-OpenClawInheritedPrivateAcl -Path $buildDirectory
+        Assert-OpenClawInheritedPrivateAcl -Path $buildDirectory -NormalizeOwner
 
         $compiledPath = Join-Path $buildDirectory 'OpenClawEasySetup.SecretResolver.exe'
         $provider = $null
@@ -805,7 +827,7 @@ function Install-OpenClawCredentialResolver {
         if (-not (Test-OpenClawResolverAssembly -Path $compiledPath)) {
             throw 'The compiled credential resolver assembly failed validation.'
         }
-        Assert-OpenClawInheritedPrivateAcl -Path $compiledPath
+        Assert-OpenClawInheritedPrivateAcl -Path $compiledPath -NormalizeOwner
         if (-not (Test-OpenClawResolverProtocol -Path $compiledPath)) {
             throw 'The compiled credential resolver failed its protocol self-test.'
         }
@@ -814,7 +836,7 @@ function Install-OpenClawCredentialResolver {
         $backupPath = Join-Path $resolverDirectory ('.previous-' + [Guid]::NewGuid().ToString('N') + '.exe')
         if (Test-Path -LiteralPath $destinationPath) {
             [void](Get-OpenClawVerifiedNormalPath -Path $destinationPath -Kind Leaf)
-            Assert-OpenClawInheritedPrivateAcl -Path $destinationPath
+            Assert-OpenClawInheritedPrivateAcl -Path $destinationPath -NormalizeOwner
             [IO.File]::Replace($compiledPath, $destinationPath, $backupPath, $true)
         }
         else {
@@ -824,7 +846,7 @@ function Install-OpenClawCredentialResolver {
         if (-not (Test-OpenClawResolverAssembly -Path $destinationPath)) {
             throw 'The installed credential resolver assembly failed validation.'
         }
-        Assert-OpenClawInheritedPrivateAcl -Path $destinationPath
+        Assert-OpenClawInheritedPrivateAcl -Path $destinationPath -NormalizeOwner
         $installedHash = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash
         if (-not [string]::Equals($compiledHash, $installedHash, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'The installed credential resolver hash did not match the verified build.'
