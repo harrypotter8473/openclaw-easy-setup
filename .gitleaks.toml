@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Synthetic recovery-receipt redaction canary"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''OCES_RECEIPT_SECRET_CANARY_1234567890''']
+  paths = ['''^tests/Run-SettingsTests\.ps1$''']

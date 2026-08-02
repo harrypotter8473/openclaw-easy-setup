@@ -13,7 +13,7 @@ foreach ($requiredPath in @($script:EngineModulePath, $script:CredentialModulePa
     }
 }
 
-Import-Module -Name $script:EngineModulePath -Force -ErrorAction Stop
+$script:EngineModule = Import-Module -Name $script:EngineModulePath -Force -PassThru -ErrorAction Stop
 Import-Module -Name $script:CredentialModulePath -Force -ErrorAction Stop
 
 function Get-OpenClawSafeSetupCatalog {
@@ -1467,6 +1467,24 @@ function Assert-OpenClawSafeSetupReceiptAcl {
     }
 }
 
+function Set-OpenClawSafeSetupReceiptAcl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    # A newly created file can use the process token's default owner (for
+    # example BUILTIN\Administrators on a hosted runner) even inside a private
+    # directory. Re-apply the engine's reviewed file ACL before asserting it.
+    $hardened = & $script:EngineModule {
+        param([string]$ReceiptPath)
+        Set-OpenClawPrivatePathAcl -Path $ReceiptPath
+    } $Path
+    if ($hardened -ne $true) {
+        throw 'The safe-setup recovery receipt ACL could not be hardened.'
+    }
+}
+
 function Write-OpenClawSafeSetupRecoveryReceipt {
     param(
         [Parameter(Mandatory = $true)]
@@ -1601,6 +1619,7 @@ function Write-OpenClawSafeSetupRecoveryReceipt {
         $stream.Dispose()
         $stream = $null
 
+        Set-OpenClawSafeSetupReceiptAcl -Path $temporaryPath
         Assert-OpenClawSafeSetupReceiptAcl -Path $temporaryPath
         if ($null -eq $existingReceipt) {
             [IO.File]::Move($temporaryPath, $receiptPath)
@@ -1612,6 +1631,7 @@ function Write-OpenClawSafeSetupRecoveryReceipt {
         if ($receiptItem.PSIsContainer -or ($receiptItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $receiptItem.Length -le 0 -or $receiptItem.Length -gt 1MB) {
             throw 'The recovery receipt failed its post-write validation.'
         }
+        Set-OpenClawSafeSetupReceiptAcl -Path $receiptPath
         Assert-OpenClawSafeSetupReceiptAcl -Path $receiptPath
         $writtenReceipt = Read-OpenClawSafeSetupRecoveryReceiptFile -Path $receiptPath -StatePath $statePath
         if (-not [string]::Equals([string]$writtenReceipt.Status, $Status, [StringComparison]::Ordinal) -or
