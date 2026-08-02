@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path $projectRoot 'src\OpenClawEasySetup.psm1'
 Import-Module -Name $modulePath -Force
+$openClawModule = Get-Module -Name OpenClawEasySetup | Select-Object -First 1
 
 $script:Passed = 0
 $script:Failed = 0
@@ -37,6 +38,21 @@ function Assert-Equal {
     Assert-True -Condition ($Actual -eq $Expected) -Name ("{0} (expected: {1}; actual: {2})" -f $Name, $Expected, $Actual)
 }
 
+function Get-ThrownException {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock
+    )
+
+    try {
+        & $ScriptBlock
+        return $null
+    }
+    catch {
+        return $_.Exception
+    }
+}
+
 $parsed = ConvertTo-OpenClawVersion -Text 'v24.15.3'
 Assert-Equal -Actual $parsed.ToString() -Expected '24.15.3' -Name 'Version parser accepts a v prefix'
 Assert-True -Condition ($null -eq (ConvertTo-OpenClawVersion -Text 'not-a-version')) -Name 'Version parser rejects invalid text'
@@ -65,6 +81,9 @@ Assert-True -Condition ([string]$config.installer.sha256 -match '^[A-Fa-f0-9]{64
 Assert-Equal -Actual $config.node.winget.id -Expected 'OpenJS.NodeJS' -Name 'Node.js WinGet package uses the exact official package ID'
 Assert-Equal -Actual $config.node.winget.version -Expected '26.5.1' -Name 'Node.js WinGet package is version-pinned'
 Assert-True -Condition ([string]$config.node.winget.installerSha256 -match '^[A-Fa-f0-9]{64}$') -Name 'Node.js installer hash is recorded'
+Assert-Equal -Actual $config.git.winget.id -Expected 'Git.Git' -Name 'Git for Windows uses the exact WinGet package ID'
+Assert-Equal -Actual $config.git.winget.version -Expected '2.55.0.3' -Name 'Git for Windows package is version-pinned'
+Assert-True -Condition ([string]$config.git.winget.installerSha256 -match '^[A-Fa-f0-9]{64}$') -Name 'Git for Windows installer hash is recorded'
 
 $plan = @(Get-OpenClawInstallPlan)
 Assert-Equal -Actual $plan.Count -Expected 8 -Name 'Install plan has eight explicit stages'
@@ -73,6 +92,7 @@ Assert-True -Condition (@($plan | Where-Object { $null -eq $_.RequiresAdmin }).C
 
 $readiness = @(Get-OpenClawReadiness)
 Assert-True -Condition ($readiness.Count -ge 10) -Name 'Readiness returns the expected checks'
+Assert-True -Condition (@($readiness | Where-Object Id -eq 'git').Count -eq 1) -Name 'Readiness includes the trusted Git prerequisite check'
 Assert-True -Condition (@($readiness | Where-Object Status -notin @('Pass', 'Warn', 'Fail', 'Info')).Count -eq 0) -Name 'Readiness statuses use the documented set'
 
 $powerShellFiles = Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') }
@@ -95,11 +115,18 @@ foreach ($powerShellFile in $powerShellFiles) {
 }
 Assert-True -Condition (-not $parseFailure) -Name 'All PowerShell files parse without syntax errors'
 Assert-True -Condition (-not $forbiddenCommand) -Name 'PowerShell code does not invoke remote text through Invoke-Expression'
+$moduleSourceText = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
+Assert-True -Condition (-not $moduleSourceText.Contains('NPM_CONFIG_FORCE')) -Name 'Installer does not enable npm force mode through NPM_CONFIG_FORCE'
+Assert-True -Condition ($moduleSourceText.Contains('GIT_CONFIG_NOSYSTEM') -and $moduleSourceText.Contains('GIT_CONFIG_GLOBAL')) -Name 'Installer isolates system and user Git configuration'
+Assert-True -Condition ($moduleSourceText.Contains('uninstall --global openclaw --ignore-scripts')) -Name 'Exact-version repair disables package lifecycle scripts during removal'
+Assert-True -Condition ($moduleSourceText.Contains('$forceNestedConfirmation') -and $moduleSourceText.Contains('Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true')) -Name 'Explicit confirmation is preserved for nested onboarding changes'
 
 $entryPoint = Join-Path $projectRoot 'OpenClawEasySetup.ps1'
+$entrySourceText = Get-Content -LiteralPath $entryPoint -Raw -Encoding UTF8
 $entryCommand = Get-Command -Name $entryPoint
 Assert-True -Condition $entryCommand.Parameters.ContainsKey('Apply') -Name 'Entry point requires an explicit Apply switch for mutations'
 Assert-True -Condition $entryCommand.Parameters.ContainsKey('WhatIf') -Name 'Entry point exposes standard WhatIf support'
+Assert-True -Condition (([regex]::Matches($entrySourceText, '\[''Confirm''\]\s*=\s*\$explicitConfirm')).Count -eq 2) -Name 'Explicit Confirm values cross the entry-point module boundary'
 & $entryPoint -Action Install
 Assert-True -Condition $? -Name 'Install preview completes without starting installation'
 & $entryPoint -Action Install -Apply -WhatIf
@@ -125,6 +152,354 @@ foreach ($file in $trackedCandidates) {
     }
 }
 Assert-True -Condition (-not $secretHit) -Name 'Repository contains no high-confidence token patterns'
+
+$stableExitCodes = @{
+    Success = 0
+    Warning = 10
+    Diagnose = 20
+    Download = 30
+    Integrity = 31
+    Prerequisite = 40
+    Install = 41
+    Configure = 42
+    Verify = 50
+    Resume = 60
+    Bundle = 70
+    Unexpected = 99
+}
+$resolvedExitDefinitions = foreach ($kind in @($stableExitCodes.Keys)) {
+    $definition = Get-OpenClawExitCodeDefinition -Kind $kind
+    Assert-Equal -Actual $definition.ExitCode -Expected $stableExitCodes[$kind] -Name ("Stable exit code for {0}" -f $kind)
+    Assert-True -Condition ([string]$definition.Id -match '^OCES-(?:SUCCESS|DIAG-WARN|[A-Z]+(?:-[A-Z]+)?-\d{3})$') -Name ("Stable error ID for {0}" -f $kind)
+    $definition
+}
+Assert-Equal -Actual @($resolvedExitDefinitions | Select-Object -ExpandProperty ExitCode -Unique).Count -Expected $stableExitCodes.Count -Name 'Stable exit codes are unique'
+Assert-Equal -Actual @($resolvedExitDefinitions | Select-Object -ExpandProperty Id -Unique).Count -Expected $stableExitCodes.Count -Name 'Stable error IDs are unique'
+
+$taggedIntegrityException = New-Object InvalidOperationException('synthetic integrity failure')
+$taggedIntegrityException.Data['OpenClawFailureKind'] = 'Integrity'
+$taggedIntegrityFailure = Resolve-OpenClawFailure -Action Install -Exception $taggedIntegrityException
+Assert-Equal -Actual $taggedIntegrityFailure.ExitCode -Expected 31 -Name 'Tagged failures retain their stable category across actions'
+$fallbackInstallFailure = Resolve-OpenClawFailure -Action Install -Exception (New-Object InvalidOperationException('synthetic install failure'))
+Assert-Equal -Actual $fallbackInstallFailure.ExitCode -Expected 41 -Name 'Untagged install failures use the stable install exit code'
+
+$syntheticToken = ('gh' + 'p_' + ('A' * 32))
+$syntheticAwsKey = ('AK' + 'IA' + ('B' * 16))
+$syntheticSlackAppToken = ('xapp' + '-' + ('C' * 24))
+$syntheticSha256 = [string]$config.installer.sha256
+$ansiEscape = [char]27
+$sensitiveText = @(
+    "token=$syntheticToken",
+    "aws=$syntheticAwsKey",
+    "slack=$syntheticSlackAppToken",
+    "https://example.invalid/support?token=$syntheticToken&mode=full",
+    $(if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { 'profile unavailable' } else { Join-Path $env:USERPROFILE 'private\openclaw.log' }),
+    ("line-one{0}line-two" -f [Environment]::NewLine),
+    ("{0}[31mred{0}[0m" -f $ansiEscape),
+    "sha256=$syntheticSha256"
+) -join ' | '
+$protectedText = Protect-OpenClawLogText -Text $sensitiveText
+Assert-True -Condition (-not $protectedText.Contains($syntheticToken)) -Name 'Log redaction removes synthetic tokens'
+Assert-True -Condition (-not $protectedText.Contains($syntheticAwsKey) -and -not $protectedText.Contains($syntheticSlackAppToken)) -Name 'Log redaction removes cloud and app token formats'
+Assert-True -Condition (-not $protectedText.Contains('?token=')) -Name 'Log redaction removes URI query strings'
+if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    Assert-True -Condition ($protectedText.IndexOf($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase) -lt 0) -Name 'Log redaction removes the current user profile path'
+    Assert-True -Condition $protectedText.Contains('%USERPROFILE%') -Name 'Log redaction leaves a useful user-profile placeholder'
+}
+Assert-True -Condition (-not $protectedText.Contains([Environment]::NewLine)) -Name 'Log redaction flattens CRLF and newline characters'
+Assert-True -Condition (-not $protectedText.Contains([string]$ansiEscape)) -Name 'Log redaction removes ANSI escape sequences'
+Assert-True -Condition $protectedText.Contains($syntheticSha256) -Name 'Log redaction preserves public SHA-256 values'
+Assert-Equal -Actual (Protect-OpenClawLogText -Text $protectedText) -Expected $protectedText -Name 'Log redaction is idempotent'
+
+$targetOpenClawVersion = [version]$config.openClaw.version
+$missingDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{ Found = $false }) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $missingDecision.Decision -Expected 'FreshInstall' -Name 'Missing OpenClaw produces a fresh-install decision'
+Assert-True -Condition $missingDecision.ChangesRequired -Name 'Missing OpenClaw requires a change'
+
+$olderDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $false; ExitCode = 0
+    Version = [version]'2026.7.0'; RawVersion = 'openclaw 2026.7.0'
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $olderDecision.Decision -Expected 'Upgrade' -Name 'Older OpenClaw produces an upgrade decision'
+
+$equalDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $false; ExitCode = 0
+    Version = $targetOpenClawVersion; RawVersion = ("openclaw {0}" -f $targetOpenClawVersion)
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $equalDecision.Decision -Expected 'AlreadyCurrent' -Name 'Equal OpenClaw produces an already-current decision'
+
+$newerDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $false; ExitCode = 0
+    Version = [version]'2027.1.0'; RawVersion = 'openclaw 2027.1.0'
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $newerDecision.Decision -Expected 'KeepNewer' -Name 'Newer OpenClaw is kept instead of downgraded'
+
+$prereleaseDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $false; ExitCode = 0
+    Version = $targetOpenClawVersion; RawVersion = ("openclaw {0}-beta.1" -f $targetOpenClawVersion)
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $prereleaseDecision.Decision -Expected 'PrereleaseBlocked' -Name 'Prerelease OpenClaw requires manual review'
+
+$nonzeroDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $false; ExitCode = 7
+    Version = $targetOpenClawVersion; RawVersion = ("openclaw {0}" -f $targetOpenClawVersion)
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $nonzeroDecision.Decision -Expected 'UnknownBlocked' -Name 'Nonzero version command exit blocks automatic installation'
+
+$ambiguousDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $true; ExitCode = 0
+    Version = $targetOpenClawVersion; RawVersion = ("openclaw {0}" -f $targetOpenClawVersion)
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $ambiguousDecision.Decision -Expected 'AmbiguousBlocked' -Name 'Ambiguous OpenClaw command paths block automatic installation'
+
+$ambiguousOutputDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $true; Ambiguous = $false; ExitCode = 0
+    Version = $targetOpenClawVersion; RawVersion = ("openclaw {0}; node 26.5.1" -f $targetOpenClawVersion)
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $ambiguousOutputDecision.Decision -Expected 'UnknownBlocked' -Name 'Multiple version values in command output block automatic installation'
+
+$untrustedDecision = Get-OpenClawInstallDecision -Snapshot ([pscustomobject]@{
+    Found = $true; Trusted = $false; Ambiguous = $false; ExitCode = 0
+    Version = $targetOpenClawVersion; RawVersion = ("openclaw {0}" -f $targetOpenClawVersion)
+}) -TargetVersion $targetOpenClawVersion
+Assert-Equal -Actual $untrustedDecision.Decision -Expected 'UntrustedBlocked' -Name 'Untrusted OpenClaw command paths block automatic installation'
+
+$temporaryTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("OpenClawEasySetup-Tests-{0}" -f ([guid]::NewGuid().ToString('N')))
+$exactTemporaryTestRoot = [IO.Path]::GetFullPath($temporaryTestRoot)
+try {
+    $sourceFingerprint = 'A' * 64
+    $checkpoint = New-OpenClawCheckpoint -StateDirectory $exactTemporaryTestRoot -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
+    Assert-True -Condition (Test-Path -LiteralPath $checkpoint.Path -PathType Leaf) -Name 'Checkpoint creation writes a state file'
+    Assert-Equal -Actual $checkpoint.Steps.Count -Expected 8 -Name 'Checkpoint contains every install stage'
+    Assert-Equal -Actual ($checkpoint.Steps.Id -join ',') -Expected 'diagnose,node,download,integrity,dryRun,install,onboard,verify' -Name 'Checkpoint stages use the stable ordered IDs'
+
+    $roundTrip = Read-OpenClawCheckpoint -Path $checkpoint.Path -ExpectedTargetVersion ([string]$config.openClaw.version) -ExpectedSourceFingerprint $sourceFingerprint
+    Assert-Equal -Actual $roundTrip.RunId -Expected $checkpoint.RunId -Name 'Checkpoint roundtrip preserves the run ID'
+    Assert-Equal -Actual $roundTrip.SourceFingerprint -Expected $sourceFingerprint -Name 'Checkpoint roundtrip preserves the source fingerprint'
+
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId diagnose -Status Running -Detail ("token={0}" -f $syntheticToken)
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId diagnose -Status Succeeded -Detail 'Readiness completed'
+    $updatedCheckpoint = Read-OpenClawCheckpoint -Path $checkpoint.Path -ExpectedTargetVersion ([string]$config.openClaw.version) -ExpectedSourceFingerprint $sourceFingerprint
+    Assert-Equal -Actual @($updatedCheckpoint.Steps | Where-Object Id -eq diagnose)[0].Status -Expected 'Succeeded' -Name 'Checkpoint stage updates survive a disk roundtrip'
+    Assert-True -Condition (-not ((Get-Content -LiteralPath $checkpoint.Path -Raw -Encoding UTF8).Contains($syntheticToken))) -Name 'Checkpoint stage detail never persists a synthetic token'
+
+    $corruptCheckpointPath = Join-Path (Split-Path -Parent $checkpoint.Path) 'corrupt.json'
+    [IO.File]::WriteAllText($corruptCheckpointPath, '{broken-json', (New-Object Text.UTF8Encoding($false)))
+    $corruptException = Get-ThrownException { Read-OpenClawCheckpoint -Path $corruptCheckpointPath }
+    Assert-True -Condition ($null -ne $corruptException -and [string]$corruptException.Data['OpenClawFailureKind'] -eq 'Resume') -Name 'Damaged checkpoint fails with the stable resume category'
+
+    $schemaCheckpointPath = Join-Path (Split-Path -Parent $checkpoint.Path) 'schema-mismatch.json'
+    $schemaCheckpoint = Get-Content -LiteralPath $checkpoint.Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $schemaCheckpoint.schemaVersion = 999
+    [IO.File]::WriteAllText($schemaCheckpointPath, ($schemaCheckpoint | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+    $schemaException = Get-ThrownException { Read-OpenClawCheckpoint -Path $schemaCheckpointPath }
+    Assert-True -Condition ($null -ne $schemaException -and [string]$schemaException.Data['OpenClawFailureKind'] -eq 'Resume') -Name 'Unsupported checkpoint schema fails with the stable resume category'
+
+    $targetMismatchException = Get-ThrownException {
+        Read-OpenClawCheckpoint -Path $checkpoint.Path -ExpectedTargetVersion '2099.1.1' -ExpectedSourceFingerprint $sourceFingerprint
+    }
+    Assert-True -Condition ($null -ne $targetMismatchException -and [string]$targetMismatchException.Data['OpenClawFailureKind'] -eq 'Resume') -Name 'Checkpoint target-version mismatch blocks resume'
+
+    $fingerprintMismatchException = Get-ThrownException {
+        Read-OpenClawCheckpoint -Path $checkpoint.Path -ExpectedTargetVersion ([string]$config.openClaw.version) -ExpectedSourceFingerprint ('B' * 64)
+    }
+    Assert-True -Condition ($null -ne $fingerprintMismatchException -and [string]$fingerprintMismatchException.Data['OpenClawFailureKind'] -eq 'Resume') -Name 'Checkpoint source-fingerprint mismatch blocks resume'
+
+    $latestCheckpointRoot = Join-Path $exactTemporaryTestRoot 'latest-checkpoint-barrier'
+    $olderIncompleteCheckpoint = New-OpenClawCheckpoint -StateDirectory $latestCheckpointRoot -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
+    $newestCompletedCheckpoint = New-OpenClawCheckpoint -StateDirectory $latestCheckpointRoot -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
+    foreach ($stageId in @($newestCompletedCheckpoint.Steps.Id)) {
+        $newestCompletedCheckpoint = Set-OpenClawCheckpointStep -Checkpoint $newestCompletedCheckpoint -StepId $stageId -Status Succeeded -Detail 'Synthetic completed run'
+    }
+    $checkpointClock = [DateTime]::UtcNow
+    [IO.File]::SetLastWriteTimeUtc($olderIncompleteCheckpoint.Path, $checkpointClock.AddMinutes(-1))
+    [IO.File]::SetLastWriteTimeUtc($newestCompletedCheckpoint.Path, $checkpointClock)
+    $latestIncompleteCheckpoint = Get-OpenClawLatestCheckpoint -StateDirectory $latestCheckpointRoot -ExpectedTargetVersion ([string]$config.openClaw.version) -ExpectedSourceFingerprint $sourceFingerprint
+    Assert-True -Condition ($null -eq $latestIncompleteCheckpoint) -Name 'Latest completed checkpoint prevents an older incomplete run from being resumed'
+    $latestCheckpointIncludingCompleted = Get-OpenClawLatestCheckpoint -StateDirectory $latestCheckpointRoot -ExpectedTargetVersion ([string]$config.openClaw.version) -ExpectedSourceFingerprint $sourceFingerprint -IncludeCompleted
+    Assert-Equal -Actual $latestCheckpointIncludingCompleted.RunId -Expected $newestCompletedCheckpoint.RunId -Name 'Latest checkpoint lookup returns the newest completed run when explicitly requested'
+
+    $resumeInstallCheckpoint = [pscustomobject]@{
+        Steps = @(
+            [pscustomobject]@{ Id = 'install'; Status = 'Pending' }
+            [pscustomobject]@{ Id = 'onboard'; Status = 'Pending' }
+        )
+    }
+    $resumeOnboardCheckpoint = [pscustomobject]@{
+        Steps = @(
+            [pscustomobject]@{ Id = 'install'; Status = 'Succeeded' }
+            [pscustomobject]@{ Id = 'onboard'; Status = 'Pending' }
+        )
+    }
+    $resumeVerifyCheckpoint = [pscustomobject]@{
+        Steps = @(
+            [pscustomobject]@{ Id = 'install'; Status = 'Succeeded' }
+            [pscustomobject]@{ Id = 'onboard'; Status = 'Succeeded' }
+        )
+    }
+    $alreadyCurrentDecision = [pscustomobject]@{ Decision = 'AlreadyCurrent' }
+    $installResumePoint = & $openClawModule { param($checkpointValue, $decisionValue) Get-OpenClawResumePoint -Checkpoint $checkpointValue -Decision $decisionValue } $resumeInstallCheckpoint $alreadyCurrentDecision
+    $onboardResumePoint = & $openClawModule { param($checkpointValue, $decisionValue) Get-OpenClawResumePoint -Checkpoint $checkpointValue -Decision $decisionValue } $resumeOnboardCheckpoint $alreadyCurrentDecision
+    $verifyResumePoint = & $openClawModule { param($checkpointValue, $decisionValue) Get-OpenClawResumePoint -Checkpoint $checkpointValue -Decision $decisionValue } $resumeVerifyCheckpoint $alreadyCurrentDecision
+    Assert-Equal -Actual $installResumePoint -Expected 'Install' -Name 'Resume point restarts installation when install did not succeed'
+    Assert-Equal -Actual $onboardResumePoint -Expected 'Onboard' -Name 'Resume point continues with onboarding after installation succeeds'
+    Assert-Equal -Actual $verifyResumePoint -Expected 'Verify' -Name 'Resume point continues with verification after onboarding succeeds'
+
+    $bestEffortCheckpoint = New-OpenClawCheckpoint -StateDirectory (Join-Path $exactTemporaryTestRoot 'best-effort-checkpoint') -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
+    $bestEffortCheckpoint.Path = Join-Path $exactTemporaryTestRoot 'missing-checkpoint-parent\checkpoint.json'
+    $bestEffortCheckpointException = Get-ThrownException {
+        [void](& $openClawModule {
+            param($checkpointValue)
+            Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpointValue -StepId diagnose -Status Failed -Detail 'Synthetic persistence failure'
+        } $bestEffortCheckpoint)
+    }
+    Assert-True -Condition ($null -eq $bestEffortCheckpointException) -Name 'Best-effort checkpoint updates do not throw when persistence fails'
+
+    $lockedInstallerPath = Join-Path $exactTemporaryTestRoot 'locked-installer.ps1'
+    [IO.File]::WriteAllText($lockedInstallerPath, '# synthetic installer', (New-Object Text.UTF8Encoding($false)))
+    $lockedInstallerStream = New-Object IO.FileStream($lockedInstallerPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try {
+        $cleanupException = Get-ThrownException {
+            [void](& $openClawModule { param($installerPath) Remove-OpenClawInstallerBestEffort -Path $installerPath } $lockedInstallerPath)
+        }
+        Assert-True -Condition ($null -eq $cleanupException) -Name 'Best-effort installer cleanup does not throw when the file is locked'
+    }
+    finally {
+        $lockedInstallerStream.Dispose()
+        if (Test-Path -LiteralPath $lockedInstallerPath -PathType Leaf) {
+            Remove-Item -LiteralPath $lockedInstallerPath -Force
+        }
+    }
+
+    $syntheticPackageRoot = Join-Path $exactTemporaryTestRoot 'synthetic-openclaw-package'
+    [void](New-Item -ItemType Directory -Path $syntheticPackageRoot -Force)
+    $syntheticPackageFile = Join-Path $syntheticPackageRoot 'index.js'
+    $syntheticCommandShim = Join-Path $exactTemporaryTestRoot 'openclaw.cmd'
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($syntheticPackageFile, 'module.exports = {};', $utf8NoBom)
+    [IO.File]::WriteAllText($syntheticCommandShim, '@echo off', $utf8NoBom)
+    $actualSourceFingerprint = (Get-FileHash -LiteralPath (Join-Path $projectRoot 'config\openclaw-source.json') -Algorithm SHA256).Hash.ToUpperInvariant()
+    $syntheticSnapshot = [pscustomobject]@{
+        Found = $true
+        Trusted = $true
+        Ambiguous = $false
+        ExitCode = 0
+        Version = $targetOpenClawVersion
+        Path = $syntheticCommandShim
+        PackageRoot = $syntheticPackageRoot
+    }
+    $provenanceStateRoot = Join-Path $exactTemporaryTestRoot 'provenance-state'
+    $provenanceReceiptPath = & $openClawModule {
+        param($snapshotValue, $targetVersionValue, $fingerprintValue, $stateDirectoryValue)
+        Write-OpenClawProvenanceReceipt -Snapshot $snapshotValue -TargetVersion $targetVersionValue -SourceFingerprint $fingerprintValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $targetOpenClawVersion $actualSourceFingerprint $provenanceStateRoot
+    Assert-True -Condition (Test-Path -LiteralPath $provenanceReceiptPath -PathType Leaf) -Name 'Provenance receipt is written for a trusted exact-version package'
+    $validProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition $validProvenanceReceipt.Valid -Name 'Provenance receipt validates after a write-read roundtrip'
+    [IO.File]::AppendAllText($syntheticPackageFile, "`n// tampered", $utf8NoBom)
+    $tamperedProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition (-not $tamperedProvenanceReceipt.Valid) -Name 'Provenance receipt detects package file tampering'
+
+    Remove-Item -LiteralPath $corruptCheckpointPath -Force
+    Remove-Item -LiteralPath $schemaCheckpointPath -Force
+
+    $logPath = New-OpenClawLog -StateDirectory $exactTemporaryTestRoot
+    Write-OpenClawLog -Path $logPath -Level Error -Event 'synthetic-failure' -Message ("See https://example.invalid/support?token={0}" -f $syntheticToken) -Data @{
+        token = $syntheticToken
+        sha256 = $syntheticSha256
+    }
+    $bundleDestination = Join-Path $exactTemporaryTestRoot 'diagnostic-bundle.zip'
+    $bundle = Export-OpenClawDiagnosticBundle -StateDirectory $exactTemporaryTestRoot -DestinationPath $bundleDestination
+    Assert-True -Condition (Test-Path -LiteralPath $bundle.Path -PathType Leaf) -Name 'Offline diagnostic bundle creates a ZIP file'
+    Assert-Equal -Actual $bundle.Sha256 -Expected (Get-FileHash -LiteralPath $bundle.Path -Algorithm SHA256).Hash.ToUpperInvariant() -Name 'Diagnostic bundle reports its actual SHA-256'
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $bundleArchive = [IO.Compression.ZipFile]::OpenRead($bundle.Path)
+    $bundleContents = @{}
+    try {
+        $bundleEntryNames = @($bundleArchive.Entries | ForEach-Object FullName)
+        $allowedBundleEntries = @('checkpoint-summary.json', 'manifest.json', 'readiness.json', 'recent-log.jsonl', 'redaction-report.json', 'versions.json')
+        Assert-Equal -Actual $bundleEntryNames.Count -Expected $allowedBundleEntries.Count -Name 'Diagnostic bundle contains only the allowlisted file count'
+        Assert-True -Condition (@($bundleEntryNames | Where-Object { $_ -notin $allowedBundleEntries }).Count -eq 0) -Name 'Diagnostic bundle contains only allowlisted file names'
+        foreach ($entry in $bundleArchive.Entries) {
+            $stream = $entry.Open()
+            $reader = New-Object IO.StreamReader($stream, (New-Object Text.UTF8Encoding($false)))
+            try {
+                $bundleContents[$entry.FullName] = $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+                $stream.Dispose()
+            }
+        }
+    }
+    finally {
+        $bundleArchive.Dispose()
+    }
+
+    $bundleJsonValid = $true
+    foreach ($jsonEntryName in @('checkpoint-summary.json', 'manifest.json', 'readiness.json', 'redaction-report.json', 'versions.json')) {
+        try {
+            $null = $bundleContents[$jsonEntryName] | ConvertFrom-Json
+        }
+        catch {
+            $bundleJsonValid = $false
+        }
+    }
+    foreach ($jsonLine in @($bundleContents['recent-log.jsonl'] -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        try {
+            $null = $jsonLine | ConvertFrom-Json
+        }
+        catch {
+            $bundleJsonValid = $false
+        }
+    }
+    Assert-True -Condition $bundleJsonValid -Name 'Every diagnostic bundle JSON payload is parseable'
+    $allBundleText = @($bundleContents.Values) -join [Environment]::NewLine
+    Assert-True -Condition (-not $allBundleText.Contains($syntheticToken)) -Name 'Diagnostic bundle excludes synthetic token values'
+    Assert-True -Condition (-not $allBundleText.Contains('?token=')) -Name 'Diagnostic bundle excludes URI query secrets'
+    if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        Assert-True -Condition ($allBundleText.IndexOf($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase) -lt 0) -Name 'Diagnostic bundle excludes the user profile path'
+    }
+
+    $entryCommand = Get-Command -Name $entryPoint
+    Assert-True -Condition $entryCommand.Parameters.ContainsKey('Resume') -Name 'Entry point exposes the Resume switch'
+    Assert-True -Condition $entryCommand.Parameters.ContainsKey('StateDirectory') -Name 'Entry point exposes the StateDirectory parameter'
+    Assert-True -Condition $entryCommand.Parameters.ContainsKey('DiagnosticOutputPath') -Name 'Entry point exposes the DiagnosticOutputPath parameter'
+
+    $resumePreviewRoot = Join-Path $exactTemporaryTestRoot 'resume-preview-must-not-exist'
+    $hostExecutable = (Get-Process -Id $PID).Path
+    $resumePreviewOutput = (& $hostExecutable -NoLogo -NoProfile -ExecutionPolicy Bypass -File $entryPoint -Action Install -Resume -StateDirectory $resumePreviewRoot 2>&1 | Out-String)
+    $resumePreviewExitCode = $LASTEXITCODE
+    Assert-Equal -Actual $resumePreviewExitCode -Expected 0 -Name 'Resume without Apply exits successfully as a preview'
+    Assert-True -Condition (-not (Test-Path -LiteralPath $resumePreviewRoot)) -Name 'Resume without Apply does not mutate its requested state directory'
+
+    $bundleWhatIfStateRoot = Join-Path $exactTemporaryTestRoot 'bundle-whatif-state-must-not-exist'
+    $bundleWhatIfDestination = Join-Path $exactTemporaryTestRoot 'bundle-whatif-must-not-exist.zip'
+    $bundleWhatIfOutput = (& $hostExecutable -NoLogo -NoProfile -ExecutionPolicy Bypass -File $entryPoint -Action Bundle -StateDirectory $bundleWhatIfStateRoot -DiagnosticOutputPath $bundleWhatIfDestination -WhatIf 2>&1 | Out-String)
+    $bundleWhatIfExitCode = $LASTEXITCODE
+    Assert-Equal -Actual $bundleWhatIfExitCode -Expected 0 -Name 'Bundle WhatIf exits successfully'
+    Assert-True -Condition (-not (Test-Path -LiteralPath $bundleWhatIfStateRoot)) -Name 'Bundle WhatIf does not create its requested state directory'
+    Assert-True -Condition (-not (Test-Path -LiteralPath $bundleWhatIfDestination)) -Name 'Bundle WhatIf does not create a diagnostic archive'
+}
+finally {
+    if (Test-Path -LiteralPath $exactTemporaryTestRoot) {
+        $resolvedTemporaryTestRoot = (Resolve-Path -LiteralPath $exactTemporaryTestRoot).Path
+        if ([string]::Equals($resolvedTemporaryTestRoot, $exactTemporaryTestRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $resolvedTemporaryTestRoot -Recurse -Force
+        }
+        else {
+            Write-Host "[FAIL] Refused to clean an unexpected temporary test path: $resolvedTemporaryTestRoot" -ForegroundColor Red
+            $script:Failed++
+        }
+    }
+}
 
 Write-Host ''
 Write-Host ("Tests passed: {0}; failed: {1}" -f $script:Passed, $script:Failed)

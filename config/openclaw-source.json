@@ -35,5 +35,14 @@
       "25.9.0",
       "26.0.0"
     ]
+  },
+  "git": {
+    "winget": {
+      "id": "Git.Git",
+      "source": "winget",
+      "version": "2.55.0.3",
+      "publisher": "The Git Development Community",
+      "installerSha256": "AF12577D0FDFF74243A5988197AA49B957D5044EDC17004F6DDF0768996F1DCA"
+    }
   }
 }

@@ -1,7 +1,12 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:DefaultSourceConfigPath = Join-Path $script:ProjectRoot 'config\openclaw-source.json'
+$recoveryModulePath = Join-Path $PSScriptRoot 'OpenClawEasySetup.Recovery.ps1'
+if (-not (Test-Path -LiteralPath $recoveryModulePath -PathType Leaf)) {
+    throw "Recovery module was not found: $recoveryModulePath"
+}
+. $recoveryModulePath
 
 function ConvertTo-OpenClawVersion {
     [CmdletBinding()]
@@ -77,6 +82,13 @@ function Get-OpenClawSourceConfig {
         [string]$config.node.winget.version -notmatch '^26\.\d+\.\d+$' -or
         [string]$config.node.winget.installerSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
         throw 'The source configuration does not contain a valid pinned Node.js WinGet package.'
+    }
+
+    if ([string]$config.git.winget.id -ne 'Git.Git' -or
+        [string]$config.git.winget.source -ne 'winget' -or
+        [string]$config.git.winget.version -notmatch '^\d+\.\d+\.\d+\.\d+$' -or
+        [string]$config.git.winget.installerSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw 'The source configuration does not contain a valid pinned Git for Windows WinGet package.'
     }
 
     if (@($config.allowedDownloadHosts).Count -eq 0) {
@@ -186,6 +198,447 @@ function Test-OpenClawIsAdministrator {
     }
 }
 
+function Get-OpenClawPackageSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandPath
+    )
+
+    $blocked = {
+        param([string]$Reason)
+        [pscustomobject]@{
+            Found = $true
+            Path = $CommandPath
+            RawVersion = $Reason
+            Version = $null
+            ExitCode = 1
+            Trusted = $false
+            Ambiguous = $false
+            EntryPath = $null
+            PackageRoot = $null
+        }
+    }
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
+            return & $blocked 'The per-user npm directory could not be determined.'
+        }
+        $packageRoot = [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'npm\node_modules\openclaw'))
+        $packagePrefix = $packageRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $packageJsonPath = Join-Path $packageRoot 'package.json'
+        if (-not (Test-Path -LiteralPath $packageJsonPath -PathType Leaf)) {
+            return & $blocked 'The OpenClaw npm package metadata was not found.'
+        }
+        foreach ($path in @($packageRoot, $packageJsonPath, $CommandPath)) {
+            $item = Get-Item -LiteralPath $path -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return & $blocked 'The OpenClaw npm package used a reparse point.'
+            }
+        }
+        $packageJsonItem = Get-Item -LiteralPath $packageJsonPath -Force
+        if ($packageJsonItem.Length -le 0 -or $packageJsonItem.Length -gt 1MB) {
+            return & $blocked 'The OpenClaw npm package metadata size was invalid.'
+        }
+        $package = Get-Content -LiteralPath $packageJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$package.name -ne 'openclaw' -or [string]$package.version -notmatch '^\d{4}\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            return & $blocked 'The OpenClaw npm package name or version was invalid.'
+        }
+        $binEntry = if ($package.bin -is [string]) {
+            [string]$package.bin
+        }
+        elseif ($null -ne $package.bin -and $null -ne $package.bin.PSObject.Properties['openclaw']) {
+            [string]$package.bin.openclaw
+        }
+        else {
+            $null
+        }
+        if ([string]::IsNullOrWhiteSpace($binEntry)) {
+            return & $blocked 'The OpenClaw npm package did not define its command entrypoint.'
+        }
+        $entryPath = [IO.Path]::GetFullPath((Join-Path $packageRoot $binEntry))
+        if (-not $entryPath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $entryPath -PathType Leaf)) {
+            return & $blocked 'The OpenClaw npm command entrypoint left the package directory.'
+        }
+        if (((Get-Item -LiteralPath $entryPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return & $blocked 'The OpenClaw npm command entrypoint was a reparse point.'
+        }
+        $commandItem = Get-Item -LiteralPath $CommandPath -Force
+        if ($commandItem.Length -le 0 -or $commandItem.Length -gt 64KB) {
+            return & $blocked 'The OpenClaw npm command shim size was invalid.'
+        }
+        $commandText = Get-Content -LiteralPath $CommandPath -Raw -Encoding UTF8
+        if ($commandText -notmatch '(?i)node_modules[\\/]openclaw[\\/]') {
+            return & $blocked 'The OpenClaw npm command shim did not reference the expected package.'
+        }
+
+        return [pscustomobject]@{
+            Found = $true
+            Path = $CommandPath
+            RawVersion = ("openclaw {0}" -f [string]$package.version)
+            Version = ConvertTo-OpenClawVersion -Text ([string]$package.version)
+            ExitCode = 0
+            Trusted = $true
+            Ambiguous = $false
+            EntryPath = $entryPath
+            PackageRoot = $packageRoot
+        }
+    }
+    catch {
+        return & $blocked 'The OpenClaw npm package provenance could not be verified.'
+    }
+}
+
+function Get-OpenClawPackageTreeDigest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackageRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($PackageRoot)
+    $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The OpenClaw package root was not a normal directory.'
+    }
+
+    $items = @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)
+    if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) {
+        throw 'The OpenClaw package tree contained a reparse point.'
+    }
+
+    $files = @($items | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName)
+    if ($files.Count -eq 0 -or $files.Count -gt 50000) {
+        throw 'The OpenClaw package tree contained an unexpected number of files.'
+    }
+
+    $rootPrefix = $root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $manifest = New-Object Text.StringBuilder
+    $totalBytes = [int64]0
+    foreach ($file in $files) {
+        $fullPath = [IO.Path]::GetFullPath($file.FullName)
+        if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'An OpenClaw package file left the package root.'
+        }
+        $totalBytes += [int64]$file.Length
+        if ($totalBytes -gt 2GB) {
+            throw 'The OpenClaw package tree exceeded the integrity size limit.'
+        }
+        $relativePath = $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+        $fileHash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        [void]$manifest.Append($relativePath).Append([char]0).Append([string]$file.Length).Append([char]0).Append($fileHash).Append("`n")
+    }
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $manifestBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($manifest.ToString())
+        $treeHash = ([BitConverter]::ToString($sha256.ComputeHash($manifestBytes))).Replace('-', '')
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    return [pscustomobject]@{
+        Sha256 = $treeHash
+        FileCount = $files.Count
+        TotalBytes = $totalBytes
+    }
+}
+
+function Get-OpenClawExistingStatePaths {
+    [CmdletBinding()]
+    param(
+        [string]$StateDirectory
+    )
+
+    $root = if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
+        $localApplicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if ([string]::IsNullOrWhiteSpace($localApplicationData)) {
+            return $null
+        }
+        Join-Path $localApplicationData 'OpenClawEasySetup'
+    }
+    else {
+        $StateDirectory
+    }
+    $root = [IO.Path]::GetFullPath($root)
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        return $null
+    }
+    $rootItem = Get-Item -LiteralPath $root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return $null
+    }
+    $markerPath = Join-Path $root '.openclaw-easy-setup-state'
+    $statePath = Join-Path $root 'State'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf) -or -not (Test-Path -LiteralPath $statePath -PathType Container)) {
+        return $null
+    }
+    $markerItem = Get-Item -LiteralPath $markerPath -Force
+    $stateItem = Get-Item -LiteralPath $statePath -Force
+    if (($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($stateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $markerItem.Length -gt 128 -or
+        (Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8).Trim() -ne 'OpenClawEasySetup-State-v1') {
+        return $null
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        foreach ($privatePath in @($root, $markerPath, $statePath)) {
+            $privateAcl = Get-Acl -LiteralPath $privatePath
+            $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $allowedSids = @($currentUserSid, 'S-1-5-18')
+            $ownerSid = $privateAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            $unexpectedAllowRule = @($privateAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Value -notin $allowedSids
+            }).Count -gt 0
+            if ($ownerSid -ne $currentUserSid -or $unexpectedAllowRule -or -not $privateAcl.AreAccessRulesProtected) {
+                return $null
+            }
+        }
+    }
+    return [pscustomobject]@{ Root = $root; State = $statePath }
+}
+
+function Write-OpenClawProvenanceReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Snapshot,
+
+        [Parameter(Mandatory = $true)]
+        [version]$TargetVersion,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Fa-f0-9]{64}$')]
+        [string]$SourceFingerprint,
+
+        [string]$StateDirectory
+    )
+
+    if (-not $Snapshot.Found -or -not $Snapshot.Trusted -or $Snapshot.Ambiguous -or
+        $Snapshot.ExitCode -ne 0 -or $null -eq $Snapshot.Version -or $Snapshot.Version -ne $TargetVersion -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.Path) -or [string]::IsNullOrWhiteSpace([string]$Snapshot.PackageRoot)) {
+        throw 'A provenance receipt can only be written for the exact trusted OpenClaw target.'
+    }
+
+    $treeDigest = Get-OpenClawPackageTreeDigest -PackageRoot $Snapshot.PackageRoot
+    $shimHash = (Get-FileHash -LiteralPath $Snapshot.Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $userSid = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    }
+    else {
+        'non-windows'
+    }
+    $directories = Initialize-OpenClawStateDirectory -Path $StateDirectory
+    $receiptPath = Join-Path $directories.State 'provenance.json'
+    $temporaryPath = Join-Path $directories.State ("provenance.{0}.tmp" -f ([guid]::NewGuid().ToString('N')))
+    $backupPath = Join-Path $directories.State ("provenance.{0}.bak" -f ([guid]::NewGuid().ToString('N')))
+    $receipt = [ordered]@{
+        schemaVersion = 1
+        toolVersion = '0.2.0'
+        targetVersion = $TargetVersion.ToString()
+        sourceFingerprint = $SourceFingerprint.ToUpperInvariant()
+        userSid = $userSid
+        packageTreeSha256 = $treeDigest.Sha256
+        packageFileCount = $treeDigest.FileCount
+        packageTotalBytes = $treeDigest.TotalBytes
+        commandShimSha256 = $shimHash
+        createdAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+
+    try {
+        $json = $receipt | ConvertTo-Json -Depth 4
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $bytes = $encoding.GetBytes($json)
+        $stream = New-Object IO.FileStream($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [void](Set-OpenClawPrivatePathAcl -Path $temporaryPath)
+        }
+        if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+            $existingReceipt = Get-Item -LiteralPath $receiptPath -Force
+            if (($existingReceipt.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'The existing provenance receipt was a reparse point.'
+            }
+            [IO.File]::Replace($temporaryPath, $receiptPath, $backupPath, $true)
+        }
+        else {
+            [IO.File]::Move($temporaryPath, $receiptPath)
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [void](Set-OpenClawPrivatePathAcl -Path $receiptPath)
+        }
+        return $receiptPath
+    }
+    finally {
+        foreach ($cleanupPath in @($temporaryPath, $backupPath)) {
+            if (Test-Path -LiteralPath $cleanupPath -PathType Leaf) {
+                Remove-Item -LiteralPath $cleanupPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Test-OpenClawProvenanceReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Snapshot,
+
+        [string]$StateDirectory
+    )
+
+    $invalid = {
+        param([string]$Reason, [string]$Path)
+        [pscustomobject]@{ Valid = $false; Reason = $Reason; Path = $Path }
+    }
+    try {
+        $paths = Get-OpenClawExistingStatePaths -StateDirectory $StateDirectory
+        if ($null -eq $paths) {
+            return & $invalid 'The OpenClaw Easy Setup state directory was not found or was invalid.' $null
+        }
+        $receiptPath = Join-Path $paths.State 'provenance.json'
+        if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+            return & $invalid 'The OpenClaw installation provenance receipt was not found.' $receiptPath
+        }
+        $receiptItem = Get-Item -LiteralPath $receiptPath -Force
+        if (($receiptItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $receiptItem.Length -le 0 -or $receiptItem.Length -gt 64KB) {
+            return & $invalid 'The OpenClaw installation provenance receipt was invalid.' $receiptPath
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $receiptAcl = Get-Acl -LiteralPath $receiptPath
+            $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $allowedSids = @($currentUserSid, 'S-1-5-18')
+            $ownerSid = $receiptAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            $unexpectedAllowRule = @($receiptAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Value -notin $allowedSids
+            }).Count -gt 0
+            if ($ownerSid -ne $currentUserSid -or $unexpectedAllowRule -or -not $receiptAcl.AreAccessRulesProtected) {
+                return & $invalid 'The OpenClaw installation provenance receipt permissions were not private.' $receiptPath
+            }
+        }
+        $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sourceFingerprint = (Get-FileHash -LiteralPath $script:DefaultSourceConfigPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        $currentSid = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        }
+        else {
+            'non-windows'
+        }
+        if ([int]$receipt.schemaVersion -ne 1 -or
+            [string]$receipt.targetVersion -notmatch '^\d{4}\.\d+\.\d+$' -or
+            [string]$receipt.sourceFingerprint -ne $sourceFingerprint -or
+            [string]$receipt.userSid -ne $currentSid -or
+            [string]$receipt.packageTreeSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [string]$receipt.commandShimSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            return & $invalid 'The OpenClaw installation provenance receipt did not match this tool or user.' $receiptPath
+        }
+        if (-not $Snapshot.Found -or -not $Snapshot.Trusted -or $Snapshot.Ambiguous -or
+            $Snapshot.ExitCode -ne 0 -or $null -eq $Snapshot.Version -or
+            $Snapshot.Version.ToString() -ne [string]$receipt.targetVersion) {
+            return & $invalid 'The installed OpenClaw version did not match its provenance receipt.' $receiptPath
+        }
+        $treeDigest = Get-OpenClawPackageTreeDigest -PackageRoot $Snapshot.PackageRoot
+        $shimHash = (Get-FileHash -LiteralPath $Snapshot.Path -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($treeDigest.Sha256 -ne ([string]$receipt.packageTreeSha256).ToUpperInvariant() -or
+            $treeDigest.FileCount -ne [int]$receipt.packageFileCount -or
+            $treeDigest.TotalBytes -ne [int64]$receipt.packageTotalBytes -or
+            $shimHash -ne ([string]$receipt.commandShimSha256).ToUpperInvariant()) {
+            return & $invalid 'The installed OpenClaw files changed after their verified installation.' $receiptPath
+        }
+        return [pscustomobject]@{ Valid = $true; Reason = ''; Path = $receiptPath }
+    }
+    catch {
+        return & $invalid 'The OpenClaw installation provenance could not be verified.' $null
+    }
+}
+
+function Test-OpenClawExternalCommandTrust {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('node', 'npm', 'winget', 'git')]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        if ($Name -eq 'winget') {
+            $expectedWinget = if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $null } else { [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe')) }
+            $trusted = -not [string]::IsNullOrWhiteSpace($expectedWinget) -and [string]::Equals($fullPath, $expectedWinget, [StringComparison]::OrdinalIgnoreCase)
+            return [pscustomobject]@{ Trusted = $trusted; Reason = $(if ($trusted) { '' } else { 'WinGet was outside the Windows App Execution Alias directory.' }) }
+        }
+
+        if ($Name -eq 'git') {
+            $gitItem = Get-Item -LiteralPath $fullPath -Force
+            if (($gitItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or [IO.Path]::GetFileName($fullPath).ToLowerInvariant() -ne 'git.exe') {
+                return [pscustomobject]@{ Trusted = $false; Reason = 'Git was not a normal git.exe file.' }
+            }
+            $expectedGitPaths = @(
+                $(if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) { $null } else { Join-Path $env:ProgramFiles 'Git\cmd\git.exe' }),
+                $(if ([string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) { $null } else { Join-Path ${env:ProgramFiles(x86)} 'Git\cmd\git.exe' }),
+                $(if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $null } else { Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd\git.exe' })
+            ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { [IO.Path]::GetFullPath($_) }
+            if (@($expectedGitPaths | Where-Object { [string]::Equals($_, $fullPath, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 1) {
+                return [pscustomobject]@{ Trusted = $false; Reason = 'Git was outside an approved Git for Windows installation directory.' }
+            }
+            $gitSignature = Get-AuthenticodeSignature -LiteralPath $fullPath
+            if ($gitSignature.Status -ne 'Valid') {
+                return [pscustomobject]@{ Trusted = $false; Reason = 'Git for Windows did not have a valid Authenticode signature.' }
+            }
+            return [pscustomobject]@{ Trusted = $true; Reason = '' }
+        }
+
+        $item = Get-Item -LiteralPath $fullPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return [pscustomobject]@{ Trusted = $false; Reason = 'The command path was a reparse point.' }
+        }
+
+        $trustedRoots = New-Object System.Collections.Generic.List[string]
+        foreach ($rootCandidate in @(
+            $(if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) { $null } else { Join-Path $env:ProgramFiles 'nodejs' }),
+            $(if ([string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) { $null } else { Join-Path ${env:ProgramFiles(x86)} 'nodejs' }),
+            $(if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $null } else { Join-Path $env:LOCALAPPDATA 'Programs\nodejs' })
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace($rootCandidate)) {
+                $trustedRoots.Add(([IO.Path]::GetFullPath($rootCandidate)).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar)
+            }
+        }
+        $trustedRoot = @($trustedRoots | Where-Object { $fullPath.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
+        if ($trustedRoot.Count -ne 1) {
+            return [pscustomobject]@{ Trusted = $false; Reason = 'Node.js command was outside an approved installation directory.' }
+        }
+
+        $nodeExecutable = if ($Name -eq 'node') { $fullPath } else { Join-Path (Split-Path -Parent $fullPath) 'node.exe' }
+        if (-not (Test-Path -LiteralPath $nodeExecutable -PathType Leaf)) {
+            return [pscustomobject]@{ Trusted = $false; Reason = 'The matching Node.js executable was not found.' }
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $nodeExecutable
+        if ($signature.Status -ne 'Valid') {
+            return [pscustomobject]@{ Trusted = $false; Reason = 'The Node.js executable did not have a valid Authenticode signature.' }
+        }
+        if ($Name -eq 'node' -and [IO.Path]::GetExtension($fullPath).ToLowerInvariant() -ne '.exe') {
+            return [pscustomobject]@{ Trusted = $false; Reason = 'The Node.js command was not an executable.' }
+        }
+        if ($Name -eq 'npm' -and [IO.Path]::GetFileName($fullPath).ToLowerInvariant() -ne 'npm.cmd') {
+            return [pscustomobject]@{ Trusted = $false; Reason = 'The npm command was not the expected npm.cmd shim.' }
+        }
+        return [pscustomobject]@{ Trusted = $true; Reason = '' }
+    }
+    catch {
+        return [pscustomobject]@{ Trusted = $false; Reason = 'The command provenance could not be verified.' }
+    }
+}
+
 function Get-OpenClawCommandSnapshot {
     [CmdletBinding()]
     param(
@@ -195,35 +648,103 @@ function Get-OpenClawCommandSnapshot {
         [string[]]$Arguments = @('--version')
     )
 
-    $command = Get-Command -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $command) {
+    $commandPath = $null
+    $trusted = $true
+    $ambiguous = $false
+
+    if ($Name -eq 'openclaw') {
+        try {
+            $commandPath = Resolve-OpenClawCommand
+        }
+        catch {
+            return [pscustomobject]@{
+                Found = $true
+                Path = $null
+                RawVersion = 'OpenClaw command resolution was blocked because the installation path was untrusted or ambiguous.'
+                Version = $null
+                ExitCode = 1
+                Trusted = $false
+                Ambiguous = $true
+            }
+        }
+    }
+    elseif ($Name -eq 'npm') {
+        $nodeCommand = Get-Command -Name 'node' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $nodeCommand -and -not [string]::IsNullOrWhiteSpace([string]$nodeCommand.Source)) {
+            $npmCommandPath = Join-Path (Split-Path -Parent $nodeCommand.Source) 'npm.cmd'
+            if (Test-Path -LiteralPath $npmCommandPath -PathType Leaf) {
+                $commandPath = $npmCommandPath
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($commandPath)) {
+            $command = Get-Command -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $command) {
+                $commandPath = $command.Source
+            }
+        }
+    }
+    else {
+        $command = Get-Command -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $command) {
+            $commandPath = $command.Source
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($commandPath)) {
         return [pscustomobject]@{
             Found = $false
             Path = $null
             RawVersion = $null
             Version = $null
             ExitCode = $null
+            Trusted = $trusted
+            Ambiguous = $ambiguous
+        }
+    }
+
+    if ($Name -eq 'openclaw') {
+        return Get-OpenClawPackageSnapshot -CommandPath $commandPath
+    }
+
+    if ($Name -in @('node', 'npm', 'winget', 'git')) {
+        $trust = Test-OpenClawExternalCommandTrust -Name $Name -Path $commandPath
+        if (-not $trust.Trusted) {
+            return [pscustomobject]@{
+                Found = $true
+                Path = $commandPath
+                RawVersion = Protect-OpenClawLogText -Text $trust.Reason
+                Version = $null
+                ExitCode = 1
+                Trusted = $false
+                Ambiguous = $false
+            }
         }
     }
 
     try {
-        $raw = (& $command.Source @Arguments 2>&1 | Out-String).Trim()
+        $raw = (& $commandPath @Arguments 2>&1 | Out-String).Trim()
         $exitCode = $LASTEXITCODE
+        $parsedVersion = ConvertTo-OpenClawVersion -Text $raw
+        $safeRaw = Protect-OpenClawLogText -Text $raw
         return [pscustomobject]@{
             Found = $true
-            Path = $command.Source
-            RawVersion = $raw
-            Version = ConvertTo-OpenClawVersion -Text $raw
+            Path = $commandPath
+            RawVersion = $safeRaw
+            Version = $parsedVersion
             ExitCode = $exitCode
+            Trusted = $trusted
+            Ambiguous = $ambiguous
         }
     }
     catch {
         return [pscustomobject]@{
             Found = $true
-            Path = $command.Source
-            RawVersion = $_.Exception.Message
+            Path = $commandPath
+            RawVersion = Protect-OpenClawLogText -Text $_.Exception.Message
             Version = $null
             ExitCode = 1
+            Trusted = $trusted
+            Ambiguous = $ambiguous
         }
     }
 }
@@ -307,27 +828,37 @@ function Get-OpenClawReadiness {
     }
 
     $winget = Get-OpenClawCommandSnapshot -Name 'winget'
-    if ($winget.Found -and $null -ne $winget.Version) {
+    $wingetUsable = $winget.Found -and $winget.Trusted -and $winget.ExitCode -eq 0 -and $null -ne $winget.Version
+    if ($wingetUsable) {
         $checks.Add((New-OpenClawReadinessCheck -Id 'winget' -Status 'Pass' -Current $winget.Version.ToString() -Required 'WinGet available for pinned Node.js provisioning' -Guidance 'WinGet will verify the exact package manifest and installer hash.'))
     }
     else {
         $checks.Add((New-OpenClawReadinessCheck -Id 'winget' -Status 'Fail' -Current $(if ($winget.Found) { $winget.RawVersion } else { 'Not found' }) -Required 'WinGet available for pinned Node.js provisioning' -Guidance 'Install or repair Microsoft App Installer before automatic prerequisite setup.'))
     }
 
+    $git = Get-OpenClawCommandSnapshot -Name 'git'
+    $gitUsable = $git.Found -and $git.Trusted -and $git.ExitCode -eq 0 -and $null -ne $git.Version
+    if ($gitUsable) {
+        $checks.Add((New-OpenClawReadinessCheck -Id 'git' -Status 'Pass' -Current $git.RawVersion -Required 'Trusted Git for Windows or pinned WinGet provisioning' -Guidance 'Only this signed Git executable will be exposed to the official OpenClaw installer.'))
+    }
+    else {
+        $checks.Add((New-OpenClawReadinessCheck -Id 'git' -Status $(if ($wingetUsable) { 'Warn' } else { 'Fail' }) -Current $(if ($git.Found) { $git.RawVersion } else { 'Not found' }) -Required 'Trusted Git for Windows or pinned WinGet provisioning' -Guidance 'The Apply flow can install pinned Git for Windows through WinGet.'))
+    }
+
     $node = Get-OpenClawCommandSnapshot -Name 'node'
     if (-not $node.Found) {
-        $checks.Add((New-OpenClawReadinessCheck -Id 'node' -Status $(if ($winget.Found) { 'Warn' } else { 'Fail' }) -Current 'Not found' -Required 'Node 26 recommended; 22.22.3+, 24.15+, or 25.9+ supported' -Guidance 'The Apply flow can install pinned Node.js 26.5.1 through WinGet.'))
+        $checks.Add((New-OpenClawReadinessCheck -Id 'node' -Status $(if ($wingetUsable) { 'Warn' } else { 'Fail' }) -Current 'Not found' -Required 'Node 26 recommended; 22.22.3+, 24.15+, or 25.9+ supported' -Guidance 'The Apply flow can install pinned Node.js 26.5.1 through WinGet.'))
     }
-    elseif ($null -eq $node.Version) {
-        $checks.Add((New-OpenClawReadinessCheck -Id 'node' -Status $(if ($winget.Found) { 'Warn' } else { 'Fail' }) -Current $node.RawVersion -Required 'A parseable supported Node.js version' -Guidance 'The Apply flow can replace this with pinned Node.js 26.5.1 through WinGet.'))
+    elseif ($node.ExitCode -ne 0 -or $null -eq $node.Version) {
+        $checks.Add((New-OpenClawReadinessCheck -Id 'node' -Status $(if ($wingetUsable) { 'Warn' } else { 'Fail' }) -Current $node.RawVersion -Required 'A parseable supported Node.js version' -Guidance 'The Apply flow can replace this with pinned Node.js 26.5.1 through WinGet.'))
     }
     else {
         $nodeSupport = Test-OpenClawNodeVersion -Version $node.Version
-        $checks.Add((New-OpenClawReadinessCheck -Id 'node' -Status $(if ($nodeSupport.Supported) { 'Pass' } elseif ($winget.Found) { 'Warn' } else { 'Fail' }) -Current $node.Version.ToString() -Required 'Node 26 recommended; 22.22.3+, 24.15+, or 25.9+ supported' -Guidance $(if ($nodeSupport.Supported) { $nodeSupport.Reason } else { 'The Apply flow can replace this with pinned Node.js 26.5.1 through WinGet.' })))
+        $checks.Add((New-OpenClawReadinessCheck -Id 'node' -Status $(if ($nodeSupport.Supported) { 'Pass' } elseif ($wingetUsable) { 'Warn' } else { 'Fail' }) -Current $node.Version.ToString() -Required 'Node 26 recommended; 22.22.3+, 24.15+, or 25.9+ supported' -Guidance $(if ($nodeSupport.Supported) { $nodeSupport.Reason } else { 'The Apply flow can replace this with pinned Node.js 26.5.1 through WinGet.' })))
     }
 
     $npm = Get-OpenClawCommandSnapshot -Name 'npm'
-    if ($npm.Found -and $null -ne $npm.Version) {
+    if ($npm.Found -and $npm.ExitCode -eq 0 -and $null -ne $npm.Version) {
         $checks.Add((New-OpenClawReadinessCheck -Id 'npm' -Status 'Pass' -Current $npm.Version.ToString() -Required 'npm available with Node.js' -Guidance 'npm is required by the pinned installation method.'))
     }
     else {
@@ -336,7 +867,8 @@ function Get-OpenClawReadiness {
 
     $openClaw = Get-OpenClawCommandSnapshot -Name 'openclaw'
     if ($openClaw.Found) {
-        $checks.Add((New-OpenClawReadinessCheck -Id 'openclaw' -Status 'Pass' -Current $(if ($null -ne $openClaw.Version) { $openClaw.Version.ToString() } else { $openClaw.RawVersion }) -Required 'Optional before installation' -Guidance 'An existing installation will be preserved and handed to the official updater.'))
+        $openClawUsable = $openClaw.Trusted -and -not $openClaw.Ambiguous -and $openClaw.ExitCode -eq 0 -and $null -ne $openClaw.Version
+        $checks.Add((New-OpenClawReadinessCheck -Id 'openclaw' -Status $(if ($openClawUsable) { 'Pass' } else { 'Fail' }) -Current $(if ($openClawUsable) { $openClaw.Version.ToString() } else { $openClaw.RawVersion }) -Required 'A single trusted per-user npm installation' -Guidance $(if ($openClawUsable) { 'The existing installation will be evaluated before any update.' } else { 'Remove duplicate or untrusted OpenClaw command shims before automatic installation.' })))
     }
     else {
         $checks.Add((New-OpenClawReadinessCheck -Id 'openclaw' -Status 'Info' -Current 'Not installed' -Required 'Optional before installation' -Guidance 'Use the plan and install actions when ready.'))
@@ -408,7 +940,8 @@ function Show-OpenClawReadiness {
             }
             Write-Host ("[{0}] {1}: {2}" -f $statusLabel, $name, $item.Current) -ForegroundColor $color
             if ($item.Status -in @('Warn', 'Fail')) {
-                Write-Host ("  -> {0}" -f $item.Guidance) -ForegroundColor DarkGray
+                $guidance = Get-OpenClawMessageValue -Messages $messages -Path ("checks.{0}.guidance" -f $item.Id) -Fallback $item.Guidance
+                Write-Host ("  -> {0}" -f $guidance) -ForegroundColor DarkGray
             }
         }
     }
@@ -419,15 +952,16 @@ function Get-OpenClawInstallPlan {
     param()
 
     $config = Get-OpenClawSourceConfig
+    $messages = Get-OpenClawMessages
     @(
-        [pscustomobject]@{ Order = 1; Id = 'diagnose'; ChangesPC = $false; RequiresAdmin = $false; Title = 'Read-only environment diagnosis'; Detail = 'Check Windows, PowerShell, architecture, disk, WinGet, Node.js, npm, and existing OpenClaw.' }
-        [pscustomobject]@{ Order = 2; Id = 'node'; ChangesPC = $true; RequiresAdmin = 'MayPrompt'; Title = 'Provision the pinned Node.js prerequisite when needed'; Detail = ("WinGet {0} {1}; installer SHA-256 recorded as {2}." -f $config.node.winget.id, $config.node.winget.version, $config.node.winget.installerSha256) }
-        [pscustomobject]@{ Order = 3; Id = 'download'; ChangesPC = $true; RequiresAdmin = $false; Title = 'Download the pinned official installer to a unique temporary file'; Detail = ("Release {0}; commit {1}; allow only HTTPS redirects on: {2}" -f $config.openClaw.releaseTag, $config.openClaw.commitSha, (@($config.allowedDownloadHosts) -join ', ')) }
-        [pscustomobject]@{ Order = 4; Id = 'integrity'; ChangesPC = $false; RequiresAdmin = $false; Title = 'Verify size, PowerShell syntax, and pinned SHA-256'; Detail = ("Expected SHA-256: {0}" -f $config.installer.sha256) }
-        [pscustomobject]@{ Order = 5; Id = 'dryRun'; ChangesPC = $false; RequiresAdmin = $false; Title = 'Run the pinned installer dry-run'; Detail = ("Use fixed method {0} and package version {1}." -f $config.installer.installMethod, $config.openClaw.version) }
-        [pscustomobject]@{ Order = 6; Id = 'install'; ChangesPC = $true; RequiresAdmin = $false; Title = 'Run the pinned official PowerShell installer'; Detail = 'Run without onboarding first, in a sanitized child environment, only after confirmation.' }
-        [pscustomobject]@{ Order = 7; Id = 'onboard'; ChangesPC = $true; RequiresAdmin = $false; Title = 'Start official OpenClaw onboarding'; Detail = 'Run with daemon installation and SecretRef input mode.' }
-        [pscustomobject]@{ Order = 8; Id = 'verify'; ChangesPC = $false; RequiresAdmin = $false; Title = 'Verify health, secrets, and security'; Detail = 'Run version, doctor, secrets audit, security audit --deep, health, and authenticated Gateway status.' }
+        [pscustomobject]@{ Order = 1; Id = 'diagnose'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.diagnoseTitle; Detail = $messages.planSteps.diagnoseDetail }
+        [pscustomobject]@{ Order = 2; Id = 'node'; ChangesPC = $true; RequiresAdmin = 'MayPrompt'; Title = $messages.planSteps.nodeTitle; Detail = ([string]$messages.planSteps.nodeDetail -f $config.git.winget.id, $config.git.winget.version, $config.git.winget.installerSha256, $config.node.winget.id, $config.node.winget.version, $config.node.winget.installerSha256) }
+        [pscustomobject]@{ Order = 3; Id = 'download'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.downloadTitle; Detail = ([string]$messages.planSteps.downloadDetail -f $config.openClaw.releaseTag, $config.openClaw.commitSha, (@($config.allowedDownloadHosts) -join ', ')) }
+        [pscustomobject]@{ Order = 4; Id = 'integrity'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.integrityTitle; Detail = ([string]$messages.planSteps.integrityDetail -f $config.installer.sha256) }
+        [pscustomobject]@{ Order = 5; Id = 'dryRun'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.dryRunTitle; Detail = ([string]$messages.planSteps.dryRunDetail -f $config.installer.installMethod, $config.openClaw.version) }
+        [pscustomobject]@{ Order = 6; Id = 'install'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.installTitle; Detail = $messages.planSteps.installDetail }
+        [pscustomobject]@{ Order = 7; Id = 'onboard'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.onboardTitle; Detail = $messages.planSteps.onboardDetail }
+        [pscustomobject]@{ Order = 8; Id = 'verify'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.verifyTitle; Detail = $messages.planSteps.verifyDetail }
     )
 }
 
@@ -443,7 +977,7 @@ function Show-OpenClawInstallPlan {
     Write-Host ''
     Write-Host $messages.planHeader -ForegroundColor Cyan
     foreach ($step in $Plan) {
-        $mutation = if ($step.ChangesPC) { 'CHANGE' } else { 'READ ONLY' }
+        $mutation = if ($step.ChangesPC) { $messages.mutationChange } else { $messages.mutationReadOnly }
         Write-Host ("{0}. [{1}] {2}" -f $step.Order, $mutation, $step.Title)
         Write-Host ("   {0}" -f $step.Detail) -ForegroundColor DarkGray
     }
@@ -510,7 +1044,7 @@ function Save-OpenClawInstaller {
 
             $declaredLength = $response.Content.Headers.ContentLength
             if ($null -ne $declaredLength -and ($declaredLength -le 0 -or $declaredLength -gt $maximumBytes)) {
-                throw "Installer response size was outside the allowed range: $declaredLength bytes"
+                throw (New-OpenClawTaggedException -Kind 'Integrity' -Message "Installer response size was outside the allowed range: $declaredLength bytes")
             }
 
             $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
@@ -521,7 +1055,7 @@ function Save-OpenClawInstaller {
                 while (($bytesRead = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
                     $totalBytes += $bytesRead
                     if ($totalBytes -gt $maximumBytes) {
-                        throw "Installer download exceeded the $maximumBytes byte limit."
+                        throw (New-OpenClawTaggedException -Kind 'Integrity' -Message "Installer download exceeded the $maximumBytes byte limit.")
                     }
                     $outputStream.Write($buffer, 0, $bytesRead)
                 }
@@ -532,19 +1066,19 @@ function Save-OpenClawInstaller {
             }
 
             if ($totalBytes -le 0) {
-                throw 'Installer download was empty.'
+                throw (New-OpenClawTaggedException -Kind 'Integrity' -Message 'Installer download was empty.')
             }
 
             $hash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToUpperInvariant()
             if ($hash -ne ([string]$SourceConfig.installer.sha256).ToUpperInvariant()) {
-                throw "Installer SHA-256 mismatch. Expected $($SourceConfig.installer.sha256) but received $hash."
+                throw (New-OpenClawTaggedException -Kind 'Integrity' -Message "Installer SHA-256 mismatch. Expected $($SourceConfig.installer.sha256) but received $hash.")
             }
 
             $tokens = $null
             $parseErrors = $null
             [void][Management.Automation.Language.Parser]::ParseFile($DestinationPath, [ref]$tokens, [ref]$parseErrors)
             if (@($parseErrors).Count -gt 0) {
-                throw "Downloaded installer did not parse as PowerShell: $($parseErrors[0].Message)"
+                throw (New-OpenClawTaggedException -Kind 'Integrity' -Message "Downloaded installer did not parse as PowerShell: $($parseErrors[0].Message)")
             }
 
             $signature = Get-AuthenticodeSignature -LiteralPath $DestinationPath
@@ -577,19 +1111,74 @@ function Resolve-OpenClawCommand {
     [CmdletBinding()]
     param()
 
-    $command = Get-Command -Name 'openclaw' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -ne $command) {
-        return $command.Source
+    if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $commandsWithoutProfile = @(Get-Command -Name 'openclaw' -All -ErrorAction SilentlyContinue)
+        if ($commandsWithoutProfile.Count -gt 0) {
+            throw 'OpenClaw was found, but its expected per-user npm installation directory could not be determined.'
+        }
+        return $null
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
-        $npmCommand = Join-Path $env:APPDATA 'npm\openclaw.cmd'
-        if (Test-Path -LiteralPath $npmCommand -PathType Leaf) {
-            return $npmCommand
+    $trustedRoot = [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'npm'))
+    $trustedPrefix = $trustedRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $candidatePaths = New-Object System.Collections.Generic.List[string]
+    foreach ($command in @(Get-Command -Name 'openclaw' -All -ErrorAction SilentlyContinue)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+            try {
+                $candidatePaths.Add([IO.Path]::GetFullPath([string]$command.Source))
+            }
+            catch {
+                throw 'An OpenClaw command candidate used an invalid path.'
+            }
         }
     }
 
-    return $null
+    foreach ($fileName in @('openclaw.cmd', 'openclaw.exe', 'openclaw.ps1')) {
+        $expectedPath = Join-Path $trustedRoot $fileName
+        if (Test-Path -LiteralPath $expectedPath -PathType Leaf) {
+            $candidatePaths.Add([IO.Path]::GetFullPath($expectedPath))
+        }
+    }
+
+    $uniqueCandidates = @($candidatePaths | Select-Object -Unique)
+    if ($uniqueCandidates.Count -eq 0) {
+        return $null
+    }
+
+    $untrustedCandidates = @($uniqueCandidates | Where-Object {
+        -not $_.StartsWith($trustedPrefix, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($untrustedCandidates.Count -gt 0) {
+        throw 'OpenClaw commands were found outside the expected per-user npm installation directory.'
+    }
+
+    foreach ($candidate in $uniqueCandidates) {
+        $item = Get-Item -LiteralPath $candidate -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'An OpenClaw command candidate was a reparse point.'
+        }
+        $candidateExtension = [IO.Path]::GetExtension($candidate).ToLowerInvariant()
+        $candidateLeaf = [IO.Path]::GetFileName($candidate)
+        if ($candidateExtension -notin @('.cmd', '.exe', '.ps1') -and $candidateLeaf -ne 'openclaw') {
+            throw 'An OpenClaw command candidate used an unexpected file type.'
+        }
+    }
+
+    $preferredCommand = Join-Path $trustedRoot 'openclaw.cmd'
+    if ($uniqueCandidates -contains [IO.Path]::GetFullPath($preferredCommand)) {
+        return [IO.Path]::GetFullPath($preferredCommand)
+    }
+
+    $preferredExecutable = @($uniqueCandidates | Where-Object { [IO.Path]::GetExtension($_) -eq '.exe' } | Select-Object -First 1)
+    if ($preferredExecutable.Count -eq 1) {
+        return $preferredExecutable[0]
+    }
+
+    if ($uniqueCandidates.Count -gt 1) {
+        throw 'Multiple OpenClaw command shims were found and no trusted command shim could be selected safely.'
+    }
+
+    return $uniqueCandidates[0]
 }
 
 function Update-OpenClawProcessPath {
@@ -602,22 +1191,55 @@ function Update-OpenClawProcessPath {
     $env:Path = @($segments.Split(';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) -join ';'
 }
 
+function Resolve-OpenClawInvocation {
+    [CmdletBinding()]
+    param(
+        [string]$StateDirectory
+    )
+
+    $commandPath = Resolve-OpenClawCommand
+    if ([string]::IsNullOrWhiteSpace($commandPath)) {
+        return $null
+    }
+    $packageSnapshot = Get-OpenClawPackageSnapshot -CommandPath $commandPath
+    if (-not $packageSnapshot.Trusted -or $packageSnapshot.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace([string]$packageSnapshot.EntryPath)) {
+        throw 'The installed OpenClaw npm package provenance could not be verified.'
+    }
+    $provenance = Test-OpenClawProvenanceReceipt -Snapshot $packageSnapshot -StateDirectory $StateDirectory
+    if (-not $provenance.Valid) {
+        throw 'The installed OpenClaw files did not match a verified OpenClaw Easy Setup installation receipt. Run Install -Apply first.'
+    }
+    $nodeSnapshot = Get-OpenClawCommandSnapshot -Name 'node'
+    if (-not $nodeSnapshot.Found -or -not $nodeSnapshot.Trusted -or $nodeSnapshot.ExitCode -ne 0) {
+        throw 'A trusted Node.js executable was not available for OpenClaw.'
+    }
+    return [pscustomobject]@{
+        Executable = $nodeSnapshot.Path
+        PrefixArguments = @($packageSnapshot.EntryPath)
+    }
+}
+
 function Start-OpenClawOnboarding {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
-    param()
+    param(
+        [string]$StateDirectory
+    )
 
     Update-OpenClawProcessPath
-    $openClawCommand = Resolve-OpenClawCommand
-    if ([string]::IsNullOrWhiteSpace($openClawCommand)) {
+    $openClawInvocation = Resolve-OpenClawInvocation -StateDirectory $StateDirectory
+    if ($null -eq $openClawInvocation) {
         throw 'OpenClaw was not found on PATH. Open a new PowerShell window and run Configure again.'
     }
 
     if ($PSCmdlet.ShouldProcess('OpenClaw user configuration and Scheduled Task', 'Run official onboarding')) {
-        & $openClawCommand onboard --install-daemon --secret-input-mode ref
+        $arguments = @($openClawInvocation.PrefixArguments) + @('onboard', '--install-daemon', '--secret-input-mode', 'ref')
+        & $openClawInvocation.Executable @arguments
         if ($LASTEXITCODE -ne 0) {
             throw "OpenClaw onboarding failed with exit code $LASTEXITCODE."
         }
+        return $true
     }
+    return $false
 }
 
 function Invoke-OpenClawPinnedInstallerFile {
@@ -629,27 +1251,96 @@ function Invoke-OpenClawPinnedInstallerFile {
         [Parameter(Mandatory = $true)]
         [object]$SourceConfig,
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        [switch]$RepairExactPackage
     )
 
     $processEnvironment = [Environment]::GetEnvironmentVariables('Process')
-    $environmentNames = @(
-        @($processEnvironment.Keys | Where-Object { ([string]$_).StartsWith('OPENCLAW_', [StringComparison]::OrdinalIgnoreCase) })
-        'NODE_OPTIONS'
-        'NPM_CONFIG_USERCONFIG'
-        'NPM_CONFIG_SCRIPT_SHELL'
-        'NPM_CONFIG_REGISTRY'
-    ) | Select-Object -Unique
     $savedEnvironment = @{}
+    foreach ($environmentName in $processEnvironment.Keys) {
+        $savedEnvironment[[string]$environmentName] = [string]$processEnvironment[$environmentName]
+    }
+    $hostPath = (Get-Process -Id $PID).Path
+    $nodeSnapshot = Get-OpenClawCommandSnapshot -Name 'node'
+    if (-not $nodeSnapshot.Found -or -not $nodeSnapshot.Trusted -or $nodeSnapshot.ExitCode -ne 0 -or $null -eq $nodeSnapshot.Version -or -not (Test-OpenClawNodeVersion -Version $nodeSnapshot.Version).Supported) {
+        throw 'A trusted, supported Node.js executable is required before launching the installer process.'
+    }
+    $gitSnapshot = Get-OpenClawCommandSnapshot -Name 'git'
+    if (-not $gitSnapshot.Found -or -not $gitSnapshot.Trusted -or $gitSnapshot.ExitCode -ne 0 -or $null -eq $gitSnapshot.Version) {
+        throw 'A trusted Git for Windows executable is required before launching the installer process.'
+    }
+    $npmSnapshot = Get-OpenClawCommandSnapshot -Name 'npm'
+    if (-not $npmSnapshot.Found -or -not $npmSnapshot.Trusted -or $npmSnapshot.ExitCode -ne 0 -or $null -eq $npmSnapshot.Version) {
+        throw 'A trusted npm command is required before launching the installer process.'
+    }
+    $nodeDirectory = Split-Path -Parent $nodeSnapshot.Path
+    $gitDirectory = Split-Path -Parent $gitSnapshot.Path
+    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $safeWorkingDirectory = Join-Path $temporaryRoot ("OpenClawEasySetup-{0}" -f ([guid]::NewGuid().ToString('N')))
+    $safeWorkingDirectory = [IO.Path]::GetFullPath($safeWorkingDirectory)
+    $temporaryPrefix = $temporaryRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $safeWorkingDirectory.StartsWith($temporaryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The isolated installer working directory was outside the Windows temporary directory.'
+    }
+    [void][IO.Directory]::CreateDirectory($safeWorkingDirectory)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [void](Set-OpenClawPrivatePathAcl -Path $safeWorkingDirectory -Directory)
+    }
+    $emptyNpmConfig = Join-Path $safeWorkingDirectory 'empty.npmrc'
+    $emptyGitConfig = Join-Path $safeWorkingDirectory 'empty.gitconfig'
+    $safeNpmCache = Join-Path $safeWorkingDirectory 'npm-cache'
+    [void][IO.Directory]::CreateDirectory($safeNpmCache)
+    [IO.File]::WriteAllText($emptyNpmConfig, '', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($emptyGitConfig, '', (New-Object Text.UTF8Encoding($false)))
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [void](Set-OpenClawPrivatePathAcl -Path $safeNpmCache -Directory)
+        [void](Set-OpenClawPrivatePathAcl -Path $emptyNpmConfig)
+        [void](Set-OpenClawPrivatePathAcl -Path $emptyGitConfig)
+    }
 
-    foreach ($name in $environmentNames) {
-        $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-        [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+    foreach ($name in @($processEnvironment.Keys)) {
+        [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
     }
 
     try {
+        foreach ($allowedName in @(
+            'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'ComSpec', 'PATHEXT',
+            'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'LOCALAPPDATA',
+            'APPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData',
+            'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'
+        )) {
+            if ($savedEnvironment.ContainsKey($allowedName)) {
+                [Environment]::SetEnvironmentVariable($allowedName, $savedEnvironment[$allowedName], 'Process')
+            }
+        }
+        $windowsDirectory = $savedEnvironment['SystemRoot']
+        $safePath = @(
+            $nodeDirectory,
+            $gitDirectory,
+            (Split-Path -Parent $hostPath),
+            $(if ([string]::IsNullOrWhiteSpace($windowsDirectory)) { $null } else { Join-Path $windowsDirectory 'System32' }),
+            $windowsDirectory,
+            $(if ([string]::IsNullOrWhiteSpace($windowsDirectory)) { $null } else { Join-Path $windowsDirectory 'System32\Wbem' }),
+            $(if ([string]::IsNullOrWhiteSpace($windowsDirectory)) { $null } else { Join-Path $windowsDirectory 'System32\WindowsPowerShell\v1.0' })
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+        [Environment]::SetEnvironmentVariable('Path', ($safePath -join ';'), 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_REGISTRY', 'https://registry.npmjs.org/', 'Process')
-        $hostPath = (Get-Process -Id $PID).Path
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $emptyNpmConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $emptyNpmConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_CACHE', $safeNpmCache, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFER_OFFLINE', 'false', 'Process')
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_NOSYSTEM', '1', 'Process')
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_GLOBAL', $emptyGitConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_COUNT', '0', 'Process')
+        [Environment]::SetEnvironmentVariable('GIT_TERMINAL_PROMPT', '0', 'Process')
+        [Environment]::SetEnvironmentVariable('GCM_INTERACTIVE', 'Never', 'Process')
+        if ($RepairExactPackage -and -not $DryRun) {
+            & $npmSnapshot.Path uninstall --global openclaw --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) {
+                throw "npm could not remove the unverified exact-version OpenClaw package before repair. Exit code: $LASTEXITCODE"
+            }
+        }
         $arguments = @(
             '-NoLogo',
             '-NoProfile',
@@ -663,13 +1354,74 @@ function Invoke-OpenClawPinnedInstallerFile {
             $arguments += '-DryRun'
         }
 
-        & $hostPath @arguments
-        return $LASTEXITCODE
+        Push-Location -LiteralPath $safeWorkingDirectory
+        try {
+            & $hostPath @arguments
+            return $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
     }
     finally {
-        foreach ($name in $environmentNames) {
-            [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+        $currentEnvironment = [Environment]::GetEnvironmentVariables('Process')
+        foreach ($name in @($currentEnvironment.Keys)) {
+            [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
         }
+        foreach ($name in $savedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable([string]$name, $savedEnvironment[$name], 'Process')
+        }
+        if (Test-Path -LiteralPath $safeWorkingDirectory -PathType Container) {
+            $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $safeWorkingDirectory).Path
+            if ($resolvedWorkingDirectory.StartsWith($temporaryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                Remove-Item -LiteralPath $resolvedWorkingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Install-OpenClawGitPrerequisite {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param()
+
+    $sourceConfig = Get-OpenClawSourceConfig
+    $currentGit = Get-OpenClawCommandSnapshot -Name 'git'
+    if ($currentGit.Found -and $currentGit.Trusted -and $currentGit.ExitCode -eq 0 -and $null -ne $currentGit.Version) {
+        Write-Host "Trusted Git for Windows is already available: $($currentGit.RawVersion)"
+        return
+    }
+
+    $winget = Get-OpenClawCommandSnapshot -Name 'winget'
+    if (-not $winget.Found -or -not $winget.Trusted -or $winget.ExitCode -ne 0) {
+        throw 'WinGet was not found or trusted. Install or repair Microsoft App Installer before automatic Git provisioning.'
+    }
+
+    $packageTarget = "{0} {1}" -f $sourceConfig.git.winget.id, $sourceConfig.git.winget.version
+    if (-not $PSCmdlet.ShouldProcess($packageTarget, 'Install the exact Git for Windows package from the WinGet source')) {
+        return
+    }
+
+    $arguments = @(
+        'install',
+        '--id', [string]$sourceConfig.git.winget.id,
+        '--exact',
+        '--source', [string]$sourceConfig.git.winget.source,
+        '--version', [string]$sourceConfig.git.winget.version,
+        '--accept-package-agreements',
+        '--accept-source-agreements',
+        '--disable-interactivity'
+    )
+    & $winget.Path @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "WinGet failed to install pinned Git for Windows with exit code $LASTEXITCODE."
+    }
+
+    Update-OpenClawProcessPath
+    $installedGit = Get-OpenClawCommandSnapshot -Name 'git'
+    $versionParts = ([string]$sourceConfig.git.winget.version).Split('.')
+    $expectedRawVersion = 'git version {0}.{1}.{2}.windows.{3}' -f $versionParts[0], $versionParts[1], $versionParts[2], $versionParts[3]
+    if (-not $installedGit.Found -or -not $installedGit.Trusted -or $installedGit.ExitCode -ne 0 -or $null -eq $installedGit.Version -or -not [string]::Equals($installedGit.RawVersion.Trim(), $expectedRawVersion, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Git provisioning did not produce pinned Git for Windows $($sourceConfig.git.winget.version)."
     }
 }
 
@@ -680,16 +1432,17 @@ function Install-OpenClawNodePrerequisite {
     $sourceConfig = Get-OpenClawSourceConfig
     $targetNodeVersion = [version]$sourceConfig.node.winget.version
     $currentNode = Get-OpenClawCommandSnapshot -Name 'node'
-    if ($currentNode.Found -and $null -ne $currentNode.Version) {
+    if ($currentNode.Found -and $currentNode.ExitCode -eq 0 -and $null -ne $currentNode.Version) {
         $support = Test-OpenClawNodeVersion -Version $currentNode.Version
-        if ($support.Supported) {
+        $currentNpm = Get-OpenClawCommandSnapshot -Name 'npm'
+        if ($support.Supported -and $currentNpm.Found -and $currentNpm.Trusted -and $currentNpm.ExitCode -eq 0 -and $null -ne $currentNpm.Version) {
             Write-Host "Supported Node.js $($currentNode.Version) is already available."
             return
         }
     }
 
     $winget = Get-OpenClawCommandSnapshot -Name 'winget'
-    if (-not $winget.Found) {
+    if (-not $winget.Found -or -not $winget.Trusted -or $winget.ExitCode -ne 0) {
         throw 'WinGet was not found. Install or repair Microsoft App Installer before automatic Node.js provisioning.'
     }
 
@@ -715,7 +1468,7 @@ function Install-OpenClawNodePrerequisite {
 
     Update-OpenClawProcessPath
     $installedNode = Get-OpenClawCommandSnapshot -Name 'node'
-    if (-not $installedNode.Found -or $null -eq $installedNode.Version -or $installedNode.Version -ne $targetNodeVersion) {
+    if (-not $installedNode.Found -or $installedNode.ExitCode -ne 0 -or $null -eq $installedNode.Version -or $installedNode.Version -ne $targetNodeVersion) {
         throw "Node.js provisioning did not produce pinned version $targetNodeVersion."
     }
 
@@ -725,8 +1478,84 @@ function Install-OpenClawNodePrerequisite {
     }
 
     $npm = Get-OpenClawCommandSnapshot -Name 'npm'
-    if (-not $npm.Found -or $null -eq $npm.Version) {
+    if (-not $npm.Found -or -not $npm.Trusted -or $npm.ExitCode -ne 0 -or $null -eq $npm.Version) {
         throw 'Pinned Node.js was installed, but npm was not available.'
+    }
+}
+
+function Get-OpenClawResumePoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Checkpoint,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Decision
+    )
+
+    if ([string]$Decision.Decision -ne 'AlreadyCurrent') {
+        return 'Install'
+    }
+    $installStep = @($Checkpoint.Steps | Where-Object Id -eq 'install')
+    if ($installStep.Count -ne 1 -or $installStep[0].Status -ne 'Succeeded') {
+        return 'Install'
+    }
+    $onboardStep = @($Checkpoint.Steps | Where-Object Id -eq 'onboard')
+    if ($onboardStep.Count -eq 1 -and $onboardStep[0].Status -eq 'Succeeded') {
+        return 'Verify'
+    }
+    return 'Onboard'
+}
+
+function Remove-OpenClawInstallerBestEffort {
+    [CmdletBinding()]
+    param(
+        [string]$Path,
+        [string]$LogPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    try {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+            try {
+                Write-OpenClawLog -Path $LogPath -Level 'Warning' -Event 'installer.cleanup-failed' -Message 'The temporary installer could not be removed. Close programs using the file and remove it manually.'
+            }
+            catch {
+                # Cleanup and cleanup logging are best effort and cannot replace the workflow result.
+            }
+        }
+        Write-Warning '임시 설치 파일을 자동으로 지우지 못했습니다. 다른 프로그램이 파일을 사용 중이라면 닫은 뒤 직접 삭제하세요.'
+    }
+}
+
+function Set-OpenClawCheckpointStepBestEffort {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Checkpoint,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('diagnose', 'node', 'download', 'integrity', 'dryRun', 'install', 'onboard', 'verify')]
+        [string]$StepId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Pending', 'Running', 'Succeeded', 'Failed', 'Skipped')]
+        [string]$Status,
+
+        [string]$Detail = ''
+    )
+
+    try {
+        return Set-OpenClawCheckpointStep -Checkpoint $Checkpoint -StepId $StepId -Status $Status -Detail $Detail
+    }
+    catch {
+        Write-Warning '복구 기록을 갱신하지 못했지만 원래 작업 결과와 오류 코드는 유지합니다.'
+        return $Checkpoint
     }
 }
 
@@ -734,7 +1563,11 @@ function Install-OpenClawOfficial {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
         [switch]$KeepInstaller,
-        [switch]$SkipOnboarding
+        [switch]$SkipOnboarding,
+        [switch]$Resume,
+        [switch]$InteractiveApproval,
+        [string]$StateDirectory,
+        [string]$LogPath
     )
 
     if (-not (Test-OpenClawIsWindows)) {
@@ -744,11 +1577,21 @@ function Install-OpenClawOfficial {
     $sourceConfig = Get-OpenClawSourceConfig
     $targetVersion = [version]$sourceConfig.openClaw.version
     $node = Get-OpenClawCommandSnapshot -Name 'node'
+    $suppressNestedConfirmation = $InteractiveApproval -or $ConfirmPreference -eq 'None'
+    $forceNestedConfirmation = $ConfirmPreference -eq 'Low'
 
     if ($WhatIfPreference) {
-        $nodeRequiresProvisioning = -not $node.Found -or $null -eq $node.Version
+        $gitForPreview = Get-OpenClawCommandSnapshot -Name 'git'
+        if (-not $gitForPreview.Found -or -not $gitForPreview.Trusted -or $gitForPreview.ExitCode -ne 0 -or $null -eq $gitForPreview.Version) {
+            [void]$PSCmdlet.ShouldProcess(("{0} {1}" -f $sourceConfig.git.winget.id, $sourceConfig.git.winget.version), 'Install the exact Git for Windows package from the WinGet source')
+        }
+        $nodeRequiresProvisioning = -not $node.Found -or $node.ExitCode -ne 0 -or $null -eq $node.Version
         if (-not $nodeRequiresProvisioning) {
             $nodeRequiresProvisioning = -not (Test-OpenClawNodeVersion -Version $node.Version).Supported
+        }
+        if (-not $nodeRequiresProvisioning) {
+            $npmForPreview = Get-OpenClawCommandSnapshot -Name 'npm'
+            $nodeRequiresProvisioning = -not $npmForPreview.Found -or -not $npmForPreview.Trusted -or $npmForPreview.ExitCode -ne 0 -or $null -eq $npmForPreview.Version
         }
         if ($nodeRequiresProvisioning) {
             [void]$PSCmdlet.ShouldProcess(("{0} {1}" -f $sourceConfig.node.winget.id, $sourceConfig.node.winget.version), 'Install the exact Node.js package from the WinGet source')
@@ -757,86 +1600,375 @@ function Install-OpenClawOfficial {
         return
     }
 
-    $nodeRequiresProvisioning = -not $node.Found -or $null -eq $node.Version
+    $sourceFingerprint = (Get-FileHash -LiteralPath $script:DefaultSourceConfigPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($Resume) {
+        $checkpoint = Get-OpenClawLatestCheckpoint -StateDirectory $StateDirectory -ExpectedTargetVersion $targetVersion.ToString() -ExpectedSourceFingerprint $sourceFingerprint
+        if ($null -eq $checkpoint) {
+            Write-Host (Get-OpenClawMessages).resumeNotFound -ForegroundColor Yellow
+            throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'No resumable installation checkpoint was found.')
+        }
+        Write-Host '중단된 설치를 찾았습니다. 현재 PC 상태를 다시 확인한 뒤 안전한 단계부터 이어갑니다.' -ForegroundColor Cyan
+    }
+    else {
+        $checkpoint = New-OpenClawCheckpoint -StateDirectory $StateDirectory -TargetVersion $targetVersion.ToString() -SourceFingerprint $sourceFingerprint
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        Write-OpenClawLog -Path $LogPath -Level 'Info' -Event 'install.start' -Message 'OpenClaw installation workflow started.' -Data @{ targetVersion = $targetVersion.ToString(); resumed = [bool]$Resume }
+    }
+
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'diagnose' -Status 'Running'
+    $readiness = @(Get-OpenClawReadiness)
+    $blockingReadiness = @($readiness | Where-Object { $_.Status -eq 'Fail' -and $_.Id -notin @('winget', 'git', 'node', 'npm', 'openclaw') })
+    if ($blockingReadiness.Count -gt 0) {
+        $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'diagnose' -Status 'Failed' -Detail 'Blocking prerequisite.'
+        throw (New-OpenClawTaggedException -Kind 'Prerequisite' -Message 'The read-only diagnosis found a blocking prerequisite.')
+    }
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'diagnose' -Status 'Succeeded'
+
+    $existing = Get-OpenClawCommandSnapshot -Name 'openclaw'
+    $decision = Get-OpenClawInstallDecision -Snapshot $existing -TargetVersion $targetVersion
+    Write-Host ("Existing installation decision: {0} - {1}" -f $decision.Decision, $decision.Reason)
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        Write-OpenClawLog -Path $LogPath -Level 'Info' -Event 'install.decision' -Message $decision.Reason -Data @{ decision = $decision.Decision; targetVersion = $targetVersion.ToString() }
+    }
+    if ($decision.Decision -in @('UnknownBlocked', 'PrereleaseBlocked', 'AmbiguousBlocked', 'UntrustedBlocked')) {
+        $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail $decision.Decision
+        throw (New-OpenClawTaggedException -Kind 'Install' -Message 'The existing OpenClaw installation could not be handled automatically.')
+    }
+    $repairExactPackage = $false
+    if ($decision.Decision -eq 'AlreadyCurrent') {
+        $alreadyCurrentProvenance = Test-OpenClawProvenanceReceipt -Snapshot $existing -StateDirectory $StateDirectory
+        if (-not $alreadyCurrentProvenance.Valid) {
+            $repairExactPackage = $true
+            Write-Host '동일 버전 설치의 무결성 영수증이 없어, 패키지 스크립트를 실행하지 않고 제거한 뒤 고정 버전으로 복구합니다.' -ForegroundColor Yellow
+            if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+                Write-OpenClawLog -Path $LogPath -Level 'Warning' -Event 'install.repair-exact' -Message 'The existing exact-version package lacked a valid provenance receipt and will be safely reinstalled.'
+            }
+        }
+    }
+
+    $resumePoint = if ($Resume -and -not $repairExactPackage) { Get-OpenClawResumePoint -Checkpoint $checkpoint -Decision $decision } else { 'Install' }
+    $resumeAfterInstalledStage = $Resume -and $resumePoint -in @('Onboard', 'Verify')
+    $requiresInstall = (($decision.Decision -in @('FreshInstall', 'Upgrade')) -or $repairExactPackage) -and -not $resumeAfterInstalledStage
+
+    if ($decision.Decision -eq 'KeepNewer') {
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'node' -Status 'Skipped' -Detail 'Newer existing version kept.'
+        foreach ($skippedStage in @('download', 'integrity', 'dryRun')) {
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId $skippedStage -Status 'Skipped' -Detail $decision.Decision
+        }
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail $decision.Decision
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Skipped' -Detail 'Newer existing version kept; automatic execution skipped.'
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Skipped' -Detail 'Run verification manually for the newer version.'
+        if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+            Write-OpenClawLog -Path $LogPath -Level 'Warning' -Event 'install.keep-newer' -Message 'A newer existing OpenClaw version was kept without automatic execution.' -Data @{ decision = $decision.Decision }
+        }
+        return [pscustomobject]@{ Decision = $decision.Decision; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
+    }
+
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'node' -Status 'Running'
+    $git = $null
+    if ($requiresInstall) {
+        $git = Get-OpenClawCommandSnapshot -Name 'git'
+        if (-not $git.Found -or -not $git.Trusted -or $git.ExitCode -ne 0 -or $null -eq $git.Version) {
+            try {
+                if ($suppressNestedConfirmation) {
+                    Install-OpenClawGitPrerequisite -Confirm:$false
+                }
+                elseif ($forceNestedConfirmation) {
+                    Install-OpenClawGitPrerequisite -Confirm:$true
+                }
+                else {
+                    Install-OpenClawGitPrerequisite
+                }
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'node' -Status 'Failed' -Detail 'Git for Windows provisioning failure.'
+                if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                    $_.Exception.Data['OpenClawFailureKind'] = 'Prerequisite'
+                }
+                throw
+            }
+            $git = Get-OpenClawCommandSnapshot -Name 'git'
+        }
+        if (-not $git.Found -or -not $git.Trusted -or $git.ExitCode -ne 0 -or $null -eq $git.Version) {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'node' -Status 'Failed' -Detail 'Trusted Git for Windows unavailable.'
+            throw (New-OpenClawTaggedException -Kind 'Prerequisite' -Message 'A trusted Git for Windows installation is required before OpenClaw installation.')
+        }
+    }
+
+    $nodeRequiresProvisioning = -not $node.Found -or $node.ExitCode -ne 0 -or $null -eq $node.Version
     if (-not $nodeRequiresProvisioning) {
         $nodeRequiresProvisioning = -not (Test-OpenClawNodeVersion -Version $node.Version).Supported
     }
+    if (-not $nodeRequiresProvisioning -and $requiresInstall) {
+        $npmBeforeProvisioning = Get-OpenClawCommandSnapshot -Name 'npm'
+        $nodeRequiresProvisioning = -not $npmBeforeProvisioning.Found -or -not $npmBeforeProvisioning.Trusted -or $npmBeforeProvisioning.ExitCode -ne 0 -or $null -eq $npmBeforeProvisioning.Version
+    }
     if ($nodeRequiresProvisioning) {
-        Install-OpenClawNodePrerequisite
+        try {
+            if ($suppressNestedConfirmation) {
+                Install-OpenClawNodePrerequisite -Confirm:$false
+            }
+            elseif ($forceNestedConfirmation) {
+                Install-OpenClawNodePrerequisite -Confirm:$true
+            }
+            else {
+                Install-OpenClawNodePrerequisite
+            }
+        }
+        catch {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'node' -Status 'Failed' -Detail 'Node.js provisioning failure.'
+            if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                $_.Exception.Data['OpenClawFailureKind'] = 'Prerequisite'
+            }
+            throw
+        }
         $node = Get-OpenClawCommandSnapshot -Name 'node'
     }
-    if (-not $node.Found -or $null -eq $node.Version -or -not (Test-OpenClawNodeVersion -Version $node.Version).Supported) {
-        throw 'A supported Node.js installation is required before OpenClaw installation.'
+    if (-not $node.Found -or $node.ExitCode -ne 0 -or $null -eq $node.Version -or -not (Test-OpenClawNodeVersion -Version $node.Version).Supported) {
+        $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'node' -Status 'Failed' -Detail 'Node.js unavailable.'
+        throw (New-OpenClawTaggedException -Kind 'Prerequisite' -Message 'A supported Node.js installation is required before OpenClaw installation.')
     }
 
-    $npm = Get-OpenClawCommandSnapshot -Name 'npm'
-    if (-not $npm.Found -or $null -eq $npm.Version) {
-        throw 'npm was not found or did not return a valid version.'
+    if ($requiresInstall) {
+        $npm = Get-OpenClawCommandSnapshot -Name 'npm'
+        if (-not $npm.Found -or -not $npm.Trusted -or $npm.ExitCode -ne 0 -or $null -eq $npm.Version) {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'node' -Status 'Failed' -Detail 'npm unavailable.'
+            throw (New-OpenClawTaggedException -Kind 'Prerequisite' -Message 'npm was not found or did not return a valid version.')
+        }
     }
+    $nodeDetail = if ($requiresInstall) { "Git {0}; Node.js {1}" -f $git.Version, $node.Version } else { "Node.js {0}" -f $node.Version }
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'node' -Status 'Succeeded' -Detail $nodeDetail
 
-    $existing = Get-OpenClawCommandSnapshot -Name 'openclaw'
-    if ($existing.Found) {
-        if ($null -eq $existing.Version) {
-            throw 'The existing OpenClaw version could not be determined. Refusing to replace it automatically.'
-        }
-        if ($existing.Version -gt $targetVersion) {
-            throw "OpenClaw $($existing.Version) is newer than pinned target $targetVersion. Automatic downgrade is blocked."
-        }
-        if ($existing.Version -eq $targetVersion) {
-            Write-Host "Pinned OpenClaw $targetVersion is already installed."
-            if (-not $SkipOnboarding) {
-                Start-OpenClawOnboarding
+    if (-not $requiresInstall) {
+        if (-not $resumeAfterInstalledStage) {
+            foreach ($skippedStage in @('download', 'integrity', 'dryRun')) {
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId $skippedStage -Status 'Skipped' -Detail $decision.Decision
             }
-            return
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail $decision.Decision
         }
+        else {
+            Write-Host '검증된 OpenClaw 설치 단계는 다시 실행하지 않고 다음 단계부터 이어갑니다.' -ForegroundColor Cyan
+        }
+
+        $priorOnboarding = @($checkpoint.Steps | Where-Object { $_.Id -eq 'onboard' -and $_.Status -eq 'Succeeded' })
+        if ($SkipOnboarding -and $resumePoint -ne 'Verify') {
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Skipped' -Detail 'Explicitly skipped by user.'
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Skipped' -Detail 'Run Verify after configuration.'
+        }
+        elseif (-not ($Resume -and $priorOnboarding.Count -gt 0)) {
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Running'
+            try {
+                if ($suppressNestedConfirmation) {
+                    $onboardingCompleted = Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$false
+                }
+                elseif ($forceNestedConfirmation) {
+                    $onboardingCompleted = Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true
+                }
+                else {
+                    $onboardingCompleted = Start-OpenClawOnboarding -StateDirectory $StateDirectory
+                }
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'onboard' -Status 'Failed' -Detail 'Onboarding failure.'
+                if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                    $_.Exception.Data['OpenClawFailureKind'] = 'Configure'
+                }
+                throw
+            }
+            if (-not $onboardingCompleted) {
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Pending' -Detail 'Onboarding confirmation was declined.'
+                return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
+            }
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Succeeded'
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Running'
+            try {
+                $verification = @(Invoke-OpenClawVerification -StateDirectory $StateDirectory)
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'verify' -Status 'Failed' -Detail 'Verification invocation failure.'
+                if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                    $_.Exception.Data['OpenClawFailureKind'] = 'Verify'
+                }
+                throw
+            }
+            if (@($verification | Where-Object Passed -eq $false).Count -gt 0) {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'verify' -Status 'Failed' -Detail 'Verification failure.'
+                throw (New-OpenClawTaggedException -Kind 'Verify' -Message 'One or more OpenClaw verification steps failed.')
+            }
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Succeeded'
+        }
+        else {
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Running'
+            try {
+                $verification = @(Invoke-OpenClawVerification -StateDirectory $StateDirectory)
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'verify' -Status 'Failed' -Detail 'Verification invocation failure.'
+                if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                    $_.Exception.Data['OpenClawFailureKind'] = 'Verify'
+                }
+                throw
+            }
+            if (@($verification | Where-Object Passed -eq $false).Count -gt 0) {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'verify' -Status 'Failed' -Detail 'Verification failure.'
+                throw (New-OpenClawTaggedException -Kind 'Verify' -Message 'One or more OpenClaw verification steps failed.')
+            }
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Succeeded'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+            Write-OpenClawLog -Path $LogPath -Level 'Info' -Event 'install.success' -Message 'OpenClaw installation workflow completed without replacing the existing version.' -Data @{ decision = $decision.Decision }
+        }
+        return [pscustomobject]@{ Decision = $decision.Decision; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
     }
 
     if (-not $PSCmdlet.ShouldProcess('This Windows user account', ("Download pinned OpenClaw {0} installer" -f $targetVersion))) {
         return
     }
 
-    $artifact = Save-OpenClawInstaller -SourceConfig $sourceConfig
+    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'download' -Status 'Running'
     try {
+        $artifact = Save-OpenClawInstaller -SourceConfig $sourceConfig
+    }
+    catch {
+        if ($_.Exception.Data.Contains('OpenClawFailureKind') -and [string]$_.Exception.Data['OpenClawFailureKind'] -eq 'Integrity') {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'download' -Status 'Succeeded' -Detail 'Response received.'
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'integrity' -Status 'Failed' -Detail 'Integrity validation failure.'
+        }
+        else {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'download' -Status 'Failed' -Detail 'Download or source validation failure.'
+            $_.Exception.Data['OpenClawFailureKind'] = 'Download'
+        }
+        throw
+    }
+    try {
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'download' -Status 'Succeeded'
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'integrity' -Status 'Succeeded' -Detail ("SHA-256 {0}" -f $artifact.Sha256)
         Write-Host ("Installer source: {0}" -f $artifact.SourceUri)
         Write-Host ("Installer SHA-256: {0}" -f $artifact.Sha256)
         Write-Host ("Authenticode status: {0}" -f $artifact.SignatureStatus)
 
-        $dryRunExitCode = Invoke-OpenClawPinnedInstallerFile -InstallerPath $artifact.Path -SourceConfig $sourceConfig -DryRun
-        if ($dryRunExitCode -ne 0) {
-            throw "The pinned OpenClaw installer dry-run failed with exit code $dryRunExitCode."
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'dryRun' -Status 'Running'
+        try {
+            $dryRunExitCode = Invoke-OpenClawPinnedInstallerFile -InstallerPath $artifact.Path -SourceConfig $sourceConfig -DryRun
         }
+        catch {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'dryRun' -Status 'Failed' -Detail 'Dry-run invocation failure.'
+            if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                $_.Exception.Data['OpenClawFailureKind'] = 'Install'
+            }
+            throw
+        }
+        if ($dryRunExitCode -ne 0) {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'dryRun' -Status 'Failed' -Detail ("Exit code {0}" -f $dryRunExitCode)
+            throw (New-OpenClawTaggedException -Kind 'Install' -Message "The pinned OpenClaw installer dry-run failed with exit code $dryRunExitCode.")
+        }
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'dryRun' -Status 'Succeeded'
 
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Running'
         if ($PSCmdlet.ShouldProcess($artifact.Path, ("Install pinned OpenClaw {0}" -f $targetVersion))) {
-            $installExitCode = Invoke-OpenClawPinnedInstallerFile -InstallerPath $artifact.Path -SourceConfig $sourceConfig
+            try {
+                $installExitCode = Invoke-OpenClawPinnedInstallerFile -InstallerPath $artifact.Path -SourceConfig $sourceConfig -RepairExactPackage:$repairExactPackage
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Installer invocation failure.'
+                if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                    $_.Exception.Data['OpenClawFailureKind'] = 'Install'
+                }
+                throw
+            }
             if ($installExitCode -ne 0) {
-                throw "The pinned OpenClaw installer failed with exit code $installExitCode."
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail ("Exit code {0}" -f $installExitCode)
+                throw (New-OpenClawTaggedException -Kind 'Install' -Message "The pinned OpenClaw installer failed with exit code $installExitCode.")
             }
 
             Update-OpenClawProcessPath
             $installed = Get-OpenClawCommandSnapshot -Name 'openclaw'
-            if (-not $installed.Found -or $null -eq $installed.Version -or $installed.Version -ne $targetVersion) {
-                throw "Installed OpenClaw version did not match pinned target $targetVersion."
+            if (-not $installed.Found -or -not $installed.Trusted -or $installed.Ambiguous -or $installed.ExitCode -ne 0 -or $null -eq $installed.Version -or $installed.Version -ne $targetVersion) {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Postcondition failure.'
+                throw (New-OpenClawTaggedException -Kind 'Install' -Message "Installed OpenClaw version did not match pinned target $targetVersion.")
             }
+            try {
+                [void](Write-OpenClawProvenanceReceipt -Snapshot $installed -TargetVersion $targetVersion -SourceFingerprint $sourceFingerprint -StateDirectory $StateDirectory)
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Provenance receipt failure.'
+                throw (New-OpenClawTaggedException -Kind 'Install' -Message 'The installed OpenClaw files could not be recorded for safe later execution.')
+            }
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail ("OpenClaw {0}" -f $installed.Version)
 
-            if (-not $SkipOnboarding) {
-                Start-OpenClawOnboarding -Confirm:$false
+            if ($SkipOnboarding) {
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Skipped' -Detail 'Explicitly skipped by user.'
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Skipped' -Detail 'Run Verify after configuration.'
+            }
+            else {
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Running'
+                try {
+                    if ($suppressNestedConfirmation) {
+                        $onboardingCompleted = Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$false
+                    }
+                    elseif ($forceNestedConfirmation) {
+                        $onboardingCompleted = Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true
+                    }
+                    else {
+                        $onboardingCompleted = Start-OpenClawOnboarding -StateDirectory $StateDirectory
+                    }
+                }
+                catch {
+                    $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'onboard' -Status 'Failed' -Detail 'Onboarding failure.'
+                    if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                        $_.Exception.Data['OpenClawFailureKind'] = 'Configure'
+                    }
+                    throw
+                }
+                if (-not $onboardingCompleted) {
+                    $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Pending' -Detail 'Onboarding confirmation was declined.'
+                    return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
+                }
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Succeeded'
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Running'
+                try {
+                    $verification = @(Invoke-OpenClawVerification -StateDirectory $StateDirectory)
+                }
+                catch {
+                    $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'verify' -Status 'Failed' -Detail 'Verification invocation failure.'
+                    if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                        $_.Exception.Data['OpenClawFailureKind'] = 'Verify'
+                    }
+                    throw
+                }
+                if (@($verification | Where-Object Passed -eq $false).Count -gt 0) {
+                    $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'verify' -Status 'Failed' -Detail 'Verification failure.'
+                    throw (New-OpenClawTaggedException -Kind 'Verify' -Message 'One or more OpenClaw verification steps failed.')
+                }
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Succeeded'
             }
         }
+        else {
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Pending' -Detail 'Installation confirmation was declined.'
+            return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+            Write-OpenClawLog -Path $LogPath -Level 'Info' -Event 'install.success' -Message 'OpenClaw installation workflow completed.' -Data @{ decision = $decision.Decision; targetVersion = $targetVersion.ToString() }
+        }
+        return [pscustomobject]@{ Decision = $decision.Decision; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
     }
     finally {
         if (-not $KeepInstaller -and (Test-Path -LiteralPath $artifact.Path)) {
-            Remove-Item -LiteralPath $artifact.Path -Force
+            Remove-OpenClawInstallerBestEffort -Path $artifact.Path -LogPath $LogPath
         }
     }
 }
 
 function Invoke-OpenClawVerification {
     [CmdletBinding()]
-    param()
+    param(
+        [string]$StateDirectory
+    )
 
     Update-OpenClawProcessPath
-    $openClawCommand = Resolve-OpenClawCommand
-    if ([string]::IsNullOrWhiteSpace($openClawCommand)) {
+    $openClawInvocation = Resolve-OpenClawInvocation -StateDirectory $StateDirectory
+    if ($null -eq $openClawInvocation) {
         throw 'OpenClaw was not found on PATH.'
     }
 
@@ -851,7 +1983,8 @@ function Invoke-OpenClawVerification {
 
     $results = foreach ($step in $steps) {
         Write-Host ("Running: {0}" -f $step.Name) -ForegroundColor Cyan
-        & $openClawCommand @($step.Arguments)
+        $arguments = @($openClawInvocation.PrefixArguments) + @($step.Arguments)
+        & $openClawInvocation.Executable @arguments
         [pscustomobject]@{
             Name = $step.Name
             ExitCode = $LASTEXITCODE
@@ -863,6 +1996,18 @@ function Invoke-OpenClawVerification {
 }
 
 Export-ModuleMember -Function @(
+    'Get-OpenClawExitCodeDefinition',
+    'Resolve-OpenClawFailure',
+    'Protect-OpenClawLogText',
+    'Initialize-OpenClawStateDirectory',
+    'New-OpenClawLog',
+    'Write-OpenClawLog',
+    'New-OpenClawCheckpoint',
+    'Read-OpenClawCheckpoint',
+    'Get-OpenClawLatestCheckpoint',
+    'Set-OpenClawCheckpointStep',
+    'Get-OpenClawInstallDecision',
+    'Export-OpenClawDiagnosticBundle',
     'ConvertTo-OpenClawVersion',
     'Get-OpenClawSourceConfig',
     'Test-OpenClawUriAllowed',
@@ -873,6 +2018,7 @@ Export-ModuleMember -Function @(
     'Get-OpenClawInstallPlan',
     'Show-OpenClawInstallPlan',
     'Save-OpenClawInstaller',
+    'Install-OpenClawGitPrerequisite',
     'Install-OpenClawNodePrerequisite',
     'Start-OpenClawOnboarding',
     'Install-OpenClawOfficial',
