@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "reviewedOn": "2026-08-02",
+  "openClaw": {
+    "version": "2026.7.1",
+    "releaseTag": "v2026.7.1",
+    "commitSha": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4"
+  },
+  "installer": {
+    "uri": "https://raw.githubusercontent.com/openclaw/openclaw/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/scripts/install.ps1",
+    "sha256": "0D473FA2A858B41A102F77582FA68799B2D80F6B637D544AB3EE4FB4661D2B89",
+    "maxBytes": 262144,
+    "installMethod": "npm"
+  },
+  "allowedDownloadHosts": [
+    "raw.githubusercontent.com"
+  ],
+  "documentation": {
+    "install": "https://docs.openclaw.ai/install",
+    "windows": "https://docs.openclaw.ai/platforms/windows",
+    "security": "https://docs.openclaw.ai/gateway/security"
+  },
+  "node": {
+    "recommendedMajor": 26,
+    "winget": {
+      "id": "OpenJS.NodeJS",
+      "source": "winget",
+      "version": "26.5.1",
+      "publisher": "Node.js Foundation",
+      "installerSha256": "826A4551BB9D3C00C61C17A2521A1E901AC7304E3090A3C2D07C1E0FE2B4D60D"
+    },
+    "supported": [
+      "22.22.3",
+      "24.15.0",
+      "25.9.0",
+      "26.0.0"
+    ]
+  }
+}

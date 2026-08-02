@@ -1,0 +1,28 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+.openclaw/
+openclaw.json
+
+# Installer artifacts and logs
+artifacts/
+downloads/
+logs/
+*.log
+*.tmp
+*.bak
+
+# PowerShell and test output
+TestResults/
+coverage/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.user
+Thumbs.db
+.DS_Store
