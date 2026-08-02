@@ -47,7 +47,7 @@ OpenClaw Easy Setup은 초보자용 화면과 실제 시스템 변경 코드를 
 
 ### GUI와 설치 프로세스 분리
 
-GUI는 일반 사용자 권한과 STA 스레드에서 실행합니다. 설치·진단·검증은 OS가 제공하는 실제 시스템 디렉터리에서 Windows PowerShell 경로를 만들고, 파일이 재분석 지점이 아니며 Authenticode 서명자가 Microsoft Corporation인지 확인한 뒤 별도 프로세스에서 실행합니다. GUI는 WinGet, npm, 다운로드 함수를 직접 호출하지 않으며 전체 앱에 `runas`를 사용하지 않습니다. 공식 온보딩만 사용자가 입력할 수 있는 별도 콘솔로 열고, 설치 본체는 `-SkipOnboarding`으로 비대화형 실행합니다.
+GUI는 일반 사용자 권한과 STA 스레드에서 실행합니다. 설치·진단·검증은 OS가 제공하는 실제 시스템 디렉터리에서 Windows PowerShell 경로를 만들고, 파일이 재분석 지점이 아니며 Authenticode 서명자가 Microsoft Corporation인지 확인한 뒤 별도 프로세스에서 실행합니다. Windows PowerShell 진입점은 상위 프로세스의 모듈 검색 경로를 버리고 해당 시스템 PowerShell의 기본 모듈 디렉터리만 사용합니다. GUI는 WinGet, npm, 다운로드 함수를 직접 호출하지 않으며 전체 앱에 `runas`를 사용하지 않습니다. 공식 온보딩만 사용자가 입력할 수 있는 별도 콘솔로 열고, 설치 본체는 `-SkipOnboarding`으로 비대화형 실행합니다.
 
 ### 계획 승인과 TOCTOU 방어
 

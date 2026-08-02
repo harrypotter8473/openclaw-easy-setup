@@ -131,8 +131,10 @@ Assert-True -Condition $entryCommand.Parameters.ContainsKey('ExpectedPlanFingerp
 Assert-True -Condition $entryCommand.Parameters.ContainsKey('GuiApproved') -Name 'Entry point exposes an argv-safe GUI approval switch'
 Assert-True -Condition $entryCommand.Parameters.ContainsKey('GuiOutput') -Name 'Entry point exposes a UTF-8 GUI diagnosis output switch'
 Assert-True -Condition (([regex]::Matches($entrySourceText, '\[''Confirm''\]\s*=\s*\$explicitConfirm')).Count -eq 2) -Name 'Explicit Confirm values cross the entry-point module boundary'
+$modulePathBeforePreview = $env:PSModulePath
 & $entryPoint -Action Install
 Assert-True -Condition $? -Name 'Install preview completes without starting installation'
+Assert-Equal -Actual $env:PSModulePath -Expected $modulePathBeforePreview -Name 'CLI preview restores the caller PowerShell module path'
 & $entryPoint -Action Install -Apply -WhatIf
 Assert-True -Condition $? -Name 'WhatIf plans prerequisite and OpenClaw changes without downloading or installing'
 

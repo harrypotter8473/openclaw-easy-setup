@@ -9,7 +9,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $guiModulePath = Join-Path $PSScriptRoot 'src\OpenClawEasySetup.Gui.psm1'
-Import-Module -Name $guiModulePath -Force
+$originalPSModulePath = $env:PSModulePath
+try {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $builtInModulePath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'Modules'))
+        if (-not (Test-Path -LiteralPath $builtInModulePath -PathType Container)) {
+            throw 'The trusted Windows PowerShell module directory was not found.'
+        }
+        $builtInModuleDirectory = Get-Item -LiteralPath $builtInModulePath -Force
+        if (($builtInModuleDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The trusted Windows PowerShell module directory was a reparse point.'
+        }
+        [Environment]::SetEnvironmentVariable('PSModulePath', $builtInModulePath, 'Process')
+        foreach ($builtInModuleName in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security')) {
+            $builtInModuleManifest = [IO.Path]::Combine($builtInModulePath, $builtInModuleName, ($builtInModuleName + '.psd1'))
+            if (-not (Test-Path -LiteralPath $builtInModuleManifest -PathType Leaf)) {
+                throw "The trusted Windows PowerShell module manifest was not found: $builtInModuleName"
+            }
+            Import-Module -Name $builtInModuleManifest -Force -ErrorAction Stop
+        }
+    }
+    Import-Module -Name $guiModulePath -Force -ErrorAction Stop
+}
+finally {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $originalPSModulePath, 'Process')
+    }
+}
 
 if ($Describe) {
     Get-OpenClawGuiDefinition | ConvertTo-Json -Depth 8

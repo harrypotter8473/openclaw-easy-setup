@@ -28,10 +28,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $modulePath = Join-Path $PSScriptRoot 'src\OpenClawEasySetup.psm1'
+$originalPSModulePath = $env:PSModulePath
+$builtInModulePath = $null
 try {
-    Import-Module -Name $modulePath -Force
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $builtInModulePath = [IO.Path]::GetFullPath([IO.Path]::Combine($PSHOME, 'Modules'))
+        if (-not (Test-Path -LiteralPath $builtInModulePath -PathType Container)) {
+            throw 'The trusted Windows PowerShell module directory was not found.'
+        }
+        $builtInModuleDirectory = Get-Item -LiteralPath $builtInModulePath -Force
+        if (($builtInModuleDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The trusted Windows PowerShell module directory was a reparse point.'
+        }
+        [Environment]::SetEnvironmentVariable('PSModulePath', $builtInModulePath, 'Process')
+        foreach ($builtInModuleName in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security')) {
+            $builtInModuleManifest = [IO.Path]::Combine($builtInModulePath, $builtInModuleName, ($builtInModuleName + '.psd1'))
+            if (-not (Test-Path -LiteralPath $builtInModuleManifest -PathType Leaf)) {
+                throw "The trusted Windows PowerShell module manifest was not found: $builtInModuleName"
+            }
+            Import-Module -Name $builtInModuleManifest -Force -ErrorAction Stop
+        }
+    }
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
 }
 catch {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $originalPSModulePath, 'Process')
+    }
     Write-Host 'OpenClaw 쉬운 설치 도우미를 시작하지 못했습니다.' -ForegroundColor Red
     Write-Host '오류 코드: OCES-UNEXPECTED-001'
     exit 99
@@ -313,5 +336,8 @@ finally {
         catch {
             # A cancellation-signal cleanup failure must not replace the workflow result.
         }
+    }
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $originalPSModulePath, 'Process')
     }
 }

@@ -62,11 +62,24 @@ function Invoke-GuiWorkerProcess {
     param(
         [Parameter(Mandatory = $true)]
         [object]$Invocation,
-        [int]$TimeoutMilliseconds = 60000
+        [int]$TimeoutMilliseconds = 60000,
+        [string]$InheritedModulePath
     )
 
     $startInfo = New-OpenClawGuiProcessStartInfo -Invocation $Invocation
-    $process = [Diagnostics.Process]::Start($startInfo)
+    $modulePathWasOverridden = $PSBoundParameters.ContainsKey('InheritedModulePath')
+    $previousModulePath = $env:PSModulePath
+    try {
+        if ($modulePathWasOverridden) {
+            $env:PSModulePath = $InheritedModulePath
+        }
+        $process = [Diagnostics.Process]::Start($startInfo)
+    }
+    finally {
+        if ($modulePathWasOverridden) {
+            $env:PSModulePath = $previousModulePath
+        }
+    }
     if ($null -eq $process) {
         throw 'The GUI worker test process did not start.'
     }
@@ -183,8 +196,8 @@ try {
     $blockedWorkerState = Join-Path $testRoot 'blocked-worker-state'
     $blockedCancellationPath = Join-Path (Join-Path $blockedWorkerState 'State') 'gui-cccccccccccccccccccccccccccccccc.cancel'
     $blockedInvocation = New-OpenClawGuiWorkerInvocation -Action Install -Approved -StateDirectory $blockedWorkerState -CancellationPath $blockedCancellationPath -PlanFingerprint ('A' * 64)
-    $blockedWorkerResult = Invoke-GuiWorkerProcess -Invocation $blockedInvocation
-    Assert-Equal -Actual $blockedWorkerResult.ExitCode -Expected 31 -Name 'Real Windows PowerShell worker binds GUI approval and rejects a changed plan before mutation'
+    $blockedWorkerResult = Invoke-GuiWorkerProcess -Invocation $blockedInvocation -InheritedModulePath (Join-Path $testRoot 'foreign-powershell-modules')
+    Assert-Equal -Actual $blockedWorkerResult.ExitCode -Expected 31 -Name 'Real Windows PowerShell worker restores trusted modules, binds GUI approval, and rejects a changed plan'
     Assert-True -Condition (-not (Test-Path -LiteralPath $blockedWorkerState)) -Name 'Changed-plan worker creates no state directory and performs no installation work'
 
     $resumeWorkerState = Join-Path $testRoot 'cancelled-resume-worker-state'
@@ -291,10 +304,16 @@ try {
 
     $guiSource = Get-Content -LiteralPath $guiEntryPoint -Raw -Encoding UTF8
     $guiModuleSource = Get-Content -LiteralPath $guiModulePath -Raw -Encoding UTF8
+    $engineEntryPointSource = Get-Content -LiteralPath (Join-Path $projectRoot 'OpenClawEasySetup.ps1') -Raw -Encoding UTF8
     Assert-True -Condition ($guiSource -notmatch '(?i)-Verb\s+RunAs|\brunas\b') -Name 'GUI source never elevates the complete application'
     Assert-True -Condition ($guiSource -notmatch '(?i)\bwinget(?:\.exe)?\b|\bnpm(?:\.cmd)?\b|Invoke-WebRequest') -Name 'GUI layer does not install or download directly'
     Assert-True -Condition ($guiModuleSource -notmatch '(?i)-Verb\s+RunAs|\brunas\b') -Name 'GUI adapter defines no broad elevation path'
     Assert-True -Condition ($guiModuleSource -notmatch '\$env:SystemRoot' -and $guiSource -notmatch '\$env:SystemRoot') -Name 'GUI and worker trust decisions do not use mutable SystemRoot'
+    Assert-True -Condition ($guiSource.Contains("[IO.Path]::Combine(`$PSHOME, 'Modules')") -and $engineEntryPointSource.Contains("[IO.Path]::Combine(`$PSHOME, 'Modules')") -and $guiSource.Contains('Microsoft.PowerShell.Utility') -and $engineEntryPointSource.Contains('Microsoft.PowerShell.Security')) -Name 'Windows PowerShell entry points load trusted built-in module manifests explicitly'
+    Assert-True -Condition ($guiSource.Contains("SetEnvironmentVariable('PSModulePath', `$originalPSModulePath, 'Process')") -and $engineEntryPointSource.Contains("SetEnvironmentVariable('PSModulePath', `$originalPSModulePath, 'Process')")) -Name 'Windows PowerShell entry points restore the caller module path'
+    $modulePathBeforeDescribe = $env:PSModulePath
+    $describeOutput = (& $guiEntryPoint -Describe | Out-String).Trim()
+    Assert-True -Condition (($describeOutput | ConvertFrom-Json).Version -eq '0.3.0' -and $env:PSModulePath -eq $modulePathBeforeDescribe) -Name 'GUI describe mode restores the live caller module path'
     Assert-True -Condition ($guiSource.Contains('AutomationEvents]::LiveRegionChanged') -and $guiSource.Contains("ResultHeadingText'].Focus()")) -Name 'Result view publishes its live-region change and moves focus to the heading'
     Assert-True -Condition ($guiSource -notmatch '\p{IsHangulSyllables}') -Name 'PowerShell 5.1 GUI script keeps localized text in the UTF-8 catalog'
 
