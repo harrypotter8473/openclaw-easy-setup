@@ -8,8 +8,10 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $engineModulePath = Join-Path $projectRoot 'src\OpenClawEasySetup.psm1'
 $guiModulePath = Join-Path $projectRoot 'src\OpenClawEasySetup.Gui.psm1'
 $guiEntryPoint = Join-Path $projectRoot 'OpenClawEasySetup.Gui.ps1'
+$settingsGuiEntryPoint = Join-Path $projectRoot 'OpenClawEasySetup.Settings.Gui.ps1'
 $guiLauncher = Join-Path $projectRoot 'Start-OpenClawEasySetup.cmd'
 $xamlPath = Join-Path $projectRoot 'ui\MainWindow.xaml'
+$settingsXamlPath = Join-Path $projectRoot 'ui\SettingsWindow.xaml'
 $localePath = Join-Path $projectRoot 'locales\ko-KR.json'
 Import-Module -Name $guiModulePath -Force
 Import-Module -Name $engineModulePath -Force
@@ -112,7 +114,7 @@ try {
     }
 
     $definition = Get-OpenClawGuiDefinition
-    Assert-Equal -Actual $definition.Version -Expected '0.3.0' -Name 'GUI definition exposes version 0.3.0'
+    Assert-Equal -Actual $definition.Version -Expected '0.4.0' -Name 'GUI definition exposes version 0.4.0'
     Assert-Equal -Actual @($definition.Actions).Count -Expected 6 -Name 'GUI exposes six beginner actions'
     Assert-Equal -Actual @($definition.Stages).Count -Expected 8 -Name 'GUI uses all eight checkpoint stages'
     Assert-True -Condition (-not $definition.Approval.DefaultApproved) -Name 'Install approval is unchecked by default'
@@ -133,7 +135,7 @@ try {
     Assert-True -Condition ($resumePlanFingerprint -match '^[A-F0-9]{64}$' -and $resumePlanFingerprint -ne $planFingerprint) -Name 'Resume approval uses a distinct plan-mode fingerprint'
     $planSnapshot = Get-OpenClawGuiPlanSnapshot -Action Install
     Assert-True -Condition (@($planSnapshot.Plan).Count -eq 8 -and $planSnapshot.Fingerprint -eq $planFingerprint) -Name 'Approval view binds one consistent plan snapshot and fingerprint'
-    Assert-Equal -Actual (Get-OpenClawGuiPrimaryAction -Status Succeeded -CompletedAction Install).Id -Expected 'Configure' -Name 'Successful install offers official configuration next'
+    Assert-Equal -Actual (Get-OpenClawGuiPrimaryAction -Status Succeeded -CompletedAction Install).Id -Expected 'Configure' -Name 'Successful install offers the safe settings wizard next'
     Assert-Equal -Actual (Get-OpenClawGuiPrimaryAction -Status Succeeded -CompletedAction Configure).Id -Expected 'Verify' -Name 'Successful configuration offers verification next'
     Assert-Equal -Actual (Get-OpenClawGuiPrimaryAction -Status Cancelled -CompletedAction Install -ResumeAvailable).Id -Expected 'Resume' -Name 'Cancelled install offers resume only when a checkpoint is available'
     Assert-Equal -Actual (Get-OpenClawGuiPrimaryAction -Status Cancelled -CompletedAction Install).Id -Expected 'Home' -Name 'Cancelled install without a checkpoint returns home'
@@ -180,11 +182,11 @@ try {
     $resumeInvocation = New-OpenClawGuiWorkerInvocation -Action Resume -Approved -StateDirectory $workerState -CancellationPath $cancellationPath -PlanFingerprint $resumePlanFingerprint
     Assert-True -Condition ($resumeInvocation.ArgumentList -contains '-Resume') -Name 'Resume worker passes the exact Resume switch'
     $configureInvocation = New-OpenClawGuiWorkerInvocation -Action Configure -Approved -StateDirectory $workerState
-    Assert-True -Condition ($configureInvocation.UseShellExecute -and -not $configureInvocation.CreateNoWindow) -Name 'Official onboarding uses a visible interactive console'
-    Assert-True -Condition ($configureInvocation.ArgumentList -notcontains '-NonInteractive') -Name 'Official onboarding console permits interactive input'
-    Assert-True -Condition ($configureInvocation.ArgumentList -contains '-GuiApproved' -and $configureInvocation.ArgumentList -notcontains '-Confirm:$false') -Name 'Official onboarding uses the argv-safe GUI approval switch'
+    Assert-True -Condition (-not $configureInvocation.UseShellExecute -and $configureInvocation.CreateNoWindow) -Name 'Safe settings wizard runs without an extra PowerShell console'
+    Assert-True -Condition ($configureInvocation.ArgumentList -contains '-STA' -and $configureInvocation.ArgumentList -contains '-NonInteractive') -Name 'Safe settings wizard uses a hidden STA worker process'
+    Assert-True -Condition ($configureInvocation.ArgumentList -contains (Join-Path $projectRoot 'OpenClawEasySetup.Settings.Gui.ps1') -and $configureInvocation.ArgumentList -notcontains '-Apply' -and $configureInvocation.ArgumentList -notcontains '-GuiApproved') -Name 'Opening the wizard cannot pre-approve its inner configuration plan'
     $configureStartInfo = New-OpenClawGuiProcessStartInfo -Invocation $configureInvocation
-    Assert-True -Condition ([string]::IsNullOrWhiteSpace($configureStartInfo.Verb)) -Name 'GUI never elevates the whole onboarding process'
+    Assert-True -Condition ([string]::IsNullOrWhiteSpace($configureStartInfo.Verb)) -Name 'GUI never elevates the settings wizard'
 
     $missingBundleDestination = Get-ThrownException { New-OpenClawGuiWorkerInvocation -Action Bundle }
     Assert-True -Condition ($null -ne $missingBundleDestination) -Name 'Diagnostic bundle requires an explicit save location'
@@ -313,7 +315,7 @@ try {
     Assert-True -Condition ($guiSource.Contains("SetEnvironmentVariable('PSModulePath', `$originalPSModulePath, 'Process')") -and $engineEntryPointSource.Contains("SetEnvironmentVariable('PSModulePath', `$originalPSModulePath, 'Process')")) -Name 'Windows PowerShell entry points restore the caller module path'
     $modulePathBeforeDescribe = $env:PSModulePath
     $describeOutput = (& $guiEntryPoint -Describe | Out-String).Trim()
-    Assert-True -Condition (($describeOutput | ConvertFrom-Json).Version -eq '0.3.0' -and $env:PSModulePath -eq $modulePathBeforeDescribe) -Name 'GUI describe mode restores the live caller module path'
+    Assert-True -Condition (($describeOutput | ConvertFrom-Json).Version -eq '0.4.0' -and $env:PSModulePath -eq $modulePathBeforeDescribe) -Name 'GUI describe mode restores the live caller module path'
     Assert-True -Condition ($guiSource.Contains('AutomationEvents]::LiveRegionChanged') -and $guiSource.Contains("ResultHeadingText'].Focus()")) -Name 'Result view publishes its live-region change and moves focus to the heading'
     Assert-True -Condition ($guiSource -notmatch '\p{IsHangulSyllables}') -Name 'PowerShell 5.1 GUI script keeps localized text in the UTF-8 catalog'
 
@@ -332,6 +334,57 @@ try {
     Assert-True -Condition $smoke.PlanItemsWrappedAndConstrained -Name 'Rendered 520x320 approval plan wraps every item within its container'
     Assert-True -Condition ($smoke.PlanShown -and -not $smoke.UnapprovedWorkerStarted -and $smoke.EscapeHandled -and $smoke.HomeRestored) -Name 'Rendered install plan blocks unapproved work and routes Escape safely home'
     Assert-True -Condition (-not (Test-Path -LiteralPath $smokeState)) -Name 'Loading the GUI does not create its state directory'
+
+    [xml]$settingsXaml = Get-Content -LiteralPath $settingsXamlPath -Raw -Encoding UTF8
+    $settingsNamespaceManager = New-Object Xml.XmlNamespaceManager($settingsXaml.NameTable)
+    $settingsNamespaceManager.AddNamespace('w', 'http://schemas.microsoft.com/winfx/2006/xaml/presentation')
+    $settingsNamespaceManager.AddNamespace('x', 'http://schemas.microsoft.com/winfx/2006/xaml')
+    $settingsInteractiveNodes = @($settingsXaml.SelectNodes('//w:Button | //w:CheckBox | //w:TextBox | //w:ComboBox | //w:PasswordBox', $settingsNamespaceManager))
+    Assert-Equal -Actual $settingsInteractiveNodes.Count -Expected 13 -Name 'Settings wizard exposes the reviewed interactive control count'
+    Assert-True -Condition (@($settingsInteractiveNodes | Where-Object { [string]::IsNullOrWhiteSpace($_.TabIndex) }).Count -eq 0) -Name 'Every settings wizard control has an explicit tab index'
+    Assert-True -Condition (@($settingsInteractiveNodes | Where-Object { [string]::IsNullOrWhiteSpace($_.'AutomationProperties.Name') }).Count -eq 0) -Name 'Every settings wizard control has an accessible name'
+    $settingsTabIndices = @($settingsInteractiveNodes | ForEach-Object { [int]$_.TabIndex })
+    Assert-Equal -Actual @($settingsTabIndices | Sort-Object -Unique).Count -Expected $settingsTabIndices.Count -Name 'Settings wizard tab indexes are unique'
+    Assert-True -Condition ([int]$settingsXaml.Window.MinWidth -le 520 -and [int]$settingsXaml.Window.MinHeight -le 320 -and $null -ne $settingsXaml.SelectSingleNode('//w:ScrollViewer', $settingsNamespaceManager)) -Name 'Settings wizard fits constrained high-DPI desktops through its scrollable layout'
+
+    $settingsGuiSource = Get-Content -LiteralPath $settingsGuiEntryPoint -Raw -Encoding UTF8
+    Assert-True -Condition ($settingsGuiSource.Contains('.SecurePassword') -and $settingsGuiSource -notmatch '\.Password\b') -Name 'Settings wizard reads secrets only through SecureString password input'
+    Assert-True -Condition ($settingsGuiSource -notmatch '(?i)-Verb\s+RunAs|\brunas\b') -Name 'Settings wizard never elevates the complete application'
+    Assert-True -Condition ($settingsGuiSource.Contains('ApprovalDefault = $false') -and $settingsGuiSource.Contains('PlaintextSecretsWrittenToConfig')) -Name 'Settings wizard keeps approval default-deny and checks the no-plaintext result contract'
+    Assert-True -Condition ($settingsGuiSource.Contains('PartialApplied = $false') -and $settingsGuiSource.Contains('OCES-SETTINGS-PARTIAL-042') -and $settingsGuiSource.Contains('$state.Plan = $null') -and $settingsGuiSource.Contains('RecoveryReceiptPath')) -Name 'Settings wizard reports partial application, preserves recovery data, and blocks blind re-apply in the same session'
+    $recoveryStartupIndex = $settingsGuiSource.IndexOf('$recoveryInitializationError = $false', [StringComparison]::Ordinal)
+    $recoveryStartupReadIndex = $settingsGuiSource.IndexOf('Get-OpenClawSafeSetupPendingRecovery', $recoveryStartupIndex, [StringComparison]::Ordinal)
+    $catalogReadIndex = $settingsGuiSource.IndexOf('Get-OpenClawSafeSetupCatalog', $recoveryStartupIndex, [StringComparison]::Ordinal)
+    Assert-True -Condition ($recoveryStartupIndex -ge 0 -and $recoveryStartupReadIndex -gt $recoveryStartupIndex -and $recoveryStartupReadIndex -lt $catalogReadIndex) -Name 'Settings startup reads and guards pending recovery before offering a new catalog workflow'
+    $previewHandlerIndex = $settingsGuiSource.IndexOf("`$controls['PreviewButton'].add_Click", [StringComparison]::Ordinal)
+    $previewRecoveryIndex = $settingsGuiSource.IndexOf('Invoke-OpenClawSafeSetupRecoveryVerification', $previewHandlerIndex, [StringComparison]::Ordinal)
+    $previewInputValidationIndex = $settingsGuiSource.IndexOf('if (-not (Test-SettingsInputsValid))', $previewHandlerIndex, [StringComparison]::Ordinal)
+    Assert-True -Condition ($previewHandlerIndex -ge 0 -and $previewRecoveryIndex -gt $previewHandlerIndex -and $previewRecoveryIndex -lt $previewInputValidationIndex) -Name 'Pending recovery recheck runs before normal secret validation or new-plan preview logic'
+    $previewRecoverySource = $settingsGuiSource.Substring($previewHandlerIndex, $previewInputValidationIndex - $previewHandlerIndex)
+    Assert-True -Condition (-not $previewRecoverySource.Contains('-EnsureGatewayService') -and -not $previewRecoverySource.Contains('-CredentialMap') -and -not $previewRecoverySource.Contains('-AcceptConfigChange')) -Name 'Unapproved pending recheck cannot restart the Gateway, replace credentials, or accept config drift'
+    $applyHandlerIndex = $settingsGuiSource.IndexOf("`$controls['ApplyButton'].add_Click", [StringComparison]::Ordinal)
+    $normalApplyGuardIndex = $settingsGuiSource.IndexOf('if ($null -eq $state.Plan', $applyHandlerIndex, [StringComparison]::Ordinal)
+    $recoveryApplySource = $settingsGuiSource.Substring($applyHandlerIndex, $normalApplyGuardIndex - $applyHandlerIndex)
+    Assert-True -Condition ($recoveryApplySource.Contains('-CredentialMap $recoveryCredentialMap') -and $recoveryApplySource.Contains('-AcceptConfigChange:$acceptConfigChange') -and $recoveryApplySource.Contains('-EnsureGatewayService') -and $recoveryApplySource.Contains('$replaceRecoverySecrets = $credentialReplacementRequired -or $anyRecoverySecret') -and -not $recoveryApplySource.Contains('New-OpenClawGatewayToken')) -Name 'Approved recovery can restart, restore the approved patch after drift, and replace model/channel secrets without rotating the Gateway token'
+    Assert-True -Condition ($settingsGuiSource.Contains('Configuration drift recovery authorization') -and $settingsGuiSource.Contains('PendingDriftRestoreAvailable') -and $settingsGuiSource.Contains('$state.AcceptConfigChangeRequired')) -Name 'Drift consent is wired to fingerprint-bound Easy Setup patch restoration'
+    Assert-True -Condition ($settingsGuiSource.Contains("'Credential replacement pending'") -and $settingsGuiSource.Contains("'Credential replacement recovery'") -and $settingsGuiSource.Contains('$state.CredentialReplacementRequired')) -Name 'Interrupted credential replacement is a distinct durable GUI recovery requirement'
+    Assert-True -Condition ($settingsGuiSource.Contains("@('ProviderComboBox', 'ModelComboBox', 'TelegramCheckBox', 'DiscordCheckBox')") -and $settingsGuiSource.Contains("`$controls[`$controlName].IsEnabled = `$false")) -Name 'Receipt-bound provider, model, and channel selections are explicitly locked in recovery mode'
+    Assert-True -Condition ($settingsGuiSource.Contains('$process.WaitForExit()') -and $settingsGuiSource.Contains('$state.ExitCode = if ($state.PartialApplied) { 42 } else { 0 }')) -Name 'Advanced setup waits for its real result and cannot erase partial-apply failure state'
+
+    $settingsDescribeOutput = (& $hostExecutable -NoLogo -NoProfile -Sta -ExecutionPolicy Bypass -File $settingsGuiEntryPoint -Describe 2>&1 | Out-String).Trim()
+    $settingsDescribe = $settingsDescribeOutput | ConvertFrom-Json
+    Assert-True -Condition ($settingsDescribe.Version -eq '0.4.0' -and $settingsDescribe.ModuleImported) -Name 'Settings wizard describe mode loads the 0.4 module contract'
+
+    $settingsSmokeState = Join-Path $testRoot 'settings-smoke-missing-state'
+    $settingsSmokeOutput = (& $hostExecutable -NoLogo -NoProfile -Sta -ExecutionPolicy Bypass -File $settingsGuiEntryPoint -SmokeTest -StateDirectory $settingsSmokeState 2>&1 | Out-String).Trim()
+    $settingsSmoke = $settingsSmokeOutput | ConvertFrom-Json
+    Assert-True -Condition ($settingsSmoke.Loaded -and $settingsSmoke.ModuleImported -and $settingsSmoke.InteractiveControls -eq 13 -and $settingsSmoke.MissingAccessibleNames -eq 0 -and $settingsSmoke.MissingTabIndexes -eq 0) -Name 'Rendered settings wizard exposes all reviewed accessible controls'
+    Assert-True -Condition ($settingsSmoke.ApprovalDefaultOff -and $settingsSmoke.ApplyDefaultDisabled -and $settingsSmoke.CancelIsDefault) -Name 'Rendered settings wizard preserves default-deny keyboard behavior'
+    Assert-True -Condition ($settingsSmoke.PendingSelectionLocked -and $settingsSmoke.PendingSecretReplacementAvailable -and $settingsSmoke.PendingReadOnlyRecheckEnabled -and $settingsSmoke.PendingRestartRequiresApproval) -Name 'Rendered pending recovery locks receipt selections and separates read-only recheck from approved restart/replacement'
+    Assert-True -Condition $settingsSmoke.PendingDriftRestoreAvailable -Name 'Rendered drift recovery exposes explicit approved-patch restoration consent'
+    Assert-True -Condition $settingsSmoke.PendingCredentialReplacementRequired -Name 'Rendered interrupted credential replacement requires the complete receipt-bound secret set, including during drift restoration'
+    Assert-True -Condition ($settingsSmoke.ExternalApiCalls -eq 0 -and $settingsSmoke.SecretsCleared) -Name 'Settings smoke test makes no external calls and clears secret inputs'
+    Assert-True -Condition (-not (Test-Path -LiteralPath $settingsSmokeState)) -Name 'Loading the settings wizard does not create its state directory'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {
@@ -340,7 +393,21 @@ finally {
         if (-not $resolvedTestRoot.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Refusing to clean a GUI test directory outside the expected test prefix.'
         }
-        Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
+        $cleanupError = $null
+        for ($cleanupAttempt = 0; $cleanupAttempt -lt 20; $cleanupAttempt++) {
+            try {
+                Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force -ErrorAction Stop
+                $cleanupError = $null
+                break
+            }
+            catch {
+                $cleanupError = $_
+                [Threading.Thread]::Sleep(100)
+            }
+        }
+        if (Test-Path -LiteralPath $resolvedTestRoot) {
+            throw "GUI test cleanup failed for the validated temporary root: $($cleanupError.Exception.Message)"
+        }
     }
 }
 

@@ -30,3 +30,27 @@
 - Separate non-elevated worker processes and a visible console only for official interactive onboarding
 - System-color, keyboard, DPI, and screen-reader accessibility metadata
 - Dependency-free GUI tests for PowerShell 5.1 and PowerShell 7
+- Korean safe-setup wizard for OpenAI, Anthropic, and Google provider/model selection
+- Optional Telegram and Discord setup with WPF `PasswordBox` secret inputs
+- Windows Credential Manager storage using run-scoped credential IDs and a native OpenClaw exec SecretRef resolver
+- Live OpenClaw `config schema`, existing-config validation, and `config patch --stdin --dry-run --json` checks
+- SHA-256 schema/config freshness checks and an approved-plan fingerprint before configuration writes
+- Redacted merge-patch preview with a separate, default-off user approval boundary
+- Local loopback Gateway with a generated 256-bit token, Tailscale and terminal disabled
+- Messaging tool profile with explicit runtime, filesystem, automation, UI, node, plugin, MCP-bundle, and elevated-tool denial
+- Safe Telegram/Discord defaults: DM pairing, groups disabled, and channel configuration writes disabled
+- Post-apply configuration, SecretRef, security, model, channel, Gateway service, and RPC checks
+- Crash-safe `Preparing` → `AppliedPendingChecks` → terminal recovery receipts with exact credential IDs, configuration hashes, atomic updates, and sanitized failed-check details
+- Startup recovery guards plus same-ID model/channel credential replacement, stable Gateway tokens, Gateway restart, and semantic re-verification
+- Fingerprint-bound exact replacement of the resolver, Gateway auth, default model, selected provider, and selected channel objects so stale endpoints, headers, or resolver environment cannot inherit new credentials
+- Value-free SecretRef binding through successful official patch provenance and configuration byte-hash continuity, with explicitly approved patch replay after drift
+- Fail-closed Gateway mutation gates plus recovery-time OpenClaw version, schema, and active-config compatibility checks
+- Durable all-secret replacement intent so an interrupted same-ID update requires the complete receipt-bound credential set again
+- Provenance receipt schema v2 with a retained full-content digest, fast metadata-tree verification, always-hashed critical files, and full-digest fallback
+- Windows PowerShell 5.1-compatible UTF-8 stdin for official OpenClaw JSON patch commands
+
+### Security
+
+- API keys and tokens are not written as plaintext by the 0.4 easy-setup path; only SecretRefs are added to OpenClaw configuration.
+- Secrets are never passed through process arguments, environment variables, temporary files, previews, or logs by the easy-setup path.
+- Credential Manager storage is scoped to the current Windows user and is documented as reducing plaintext-at-rest exposure, not isolating secrets from other processes running as that user.

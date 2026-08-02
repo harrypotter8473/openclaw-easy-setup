@@ -37,11 +37,16 @@
 
 ## 0.4 — 쉬운 설정
 
-- [ ] 공식 설정 스키마 검증
-- [ ] 로컬 전용 Gateway와 강한 인증값
-- [ ] 모델 제공자 선택 및 Windows Credential Manager 저장
-- [ ] Telegram/Discord 등 채널별 안전한 마법사
-- [ ] 최소 권한 프리셋과 설정 차이 미리보기
+- [x] 공식 `config schema`, `config validate`, `config patch --dry-run --json` 검증
+- [x] 스키마·기존 설정 SHA-256 freshness 확인과 승인된 계획 지문
+- [x] 로컬 loopback Gateway와 자동 생성 256-bit 인증 토큰
+- [x] OpenAI·Anthropic·Google 모델 제공자 및 검토된 모델 선택
+- [x] Windows Credential Manager와 네이티브 exec resolver를 통한 SecretRef 저장
+- [x] Telegram·Discord 채널별 PasswordBox 입력과 안전한 선택형 마법사
+- [x] DM 페어링, 그룹 차단, 채널 설정 쓰기 차단 기본값
+- [x] messaging 프로필과 고위험 도구·elevated 명시적 차단
+- [x] 비밀값이 제거된 설정 차이 미리보기와 기본 거부 적용 승인
+- [x] 적용 후 설정·SecretRef·보안·모델·채널·Gateway 상태 검사
 
 ## 1.0 — 배포
 

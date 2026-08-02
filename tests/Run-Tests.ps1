@@ -69,6 +69,8 @@ Assert-True -Condition ($recommendedNode26.Supported -and $recommendedNode26.Rec
 
 $config = Get-OpenClawSourceConfig
 Assert-Equal -Actual $config.schemaVersion -Expected 1 -Name 'Source configuration schema is supported'
+$recoveryToolVersion = & $openClawModule { $script:RecoveryToolVersion }
+Assert-Equal -Actual $recoveryToolVersion -Expected '0.4.0' -Name 'Recovery and checkpoint metadata uses the current tool version'
 $officialUri = [uri]$config.installer.uri
 Assert-True -Condition (Test-OpenClawUriAllowed -Uri $officialUri -AllowedHosts @($config.allowedDownloadHosts)) -Name 'Official HTTPS installer URI is allowed'
 Assert-True -Condition (-not (Test-OpenClawUriAllowed -Uri ([uri]'http://openclaw.ai/install.ps1') -AllowedHosts @($config.allowedDownloadHosts))) -Name 'HTTP installer URI is rejected'
@@ -95,7 +97,10 @@ Assert-True -Condition ($readiness.Count -ge 10) -Name 'Readiness returns the ex
 Assert-True -Condition (@($readiness | Where-Object Id -eq 'git').Count -eq 1) -Name 'Readiness includes the trusted Git prerequisite check'
 Assert-True -Condition (@($readiness | Where-Object Status -notin @('Pass', 'Warn', 'Fail', 'Info')).Count -eq 0) -Name 'Readiness statuses use the documented set'
 
-$powerShellFiles = Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') }
+$powerShellFiles = Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object {
+    $_.Extension -in @('.ps1', '.psm1') -and
+    $_.FullName -notmatch '[\\/]tests[\\/]\.tmp-'
+}
 $parseFailure = $false
 $forbiddenCommand = $false
 foreach ($powerShellFile in $powerShellFiles) {
@@ -117,6 +122,7 @@ Assert-True -Condition (-not $parseFailure) -Name 'All PowerShell files parse wi
 Assert-True -Condition (-not $forbiddenCommand) -Name 'PowerShell code does not invoke remote text through Invoke-Expression'
 $moduleSourceText = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
 Assert-True -Condition (-not $moduleSourceText.Contains('NPM_CONFIG_FORCE')) -Name 'Installer does not enable npm force mode through NPM_CONFIG_FORCE'
+Assert-True -Condition ($moduleSourceText.Contains("OpenClaw-Easy-Setup/0.4")) -Name 'Installer network requests identify the current tool version'
 Assert-True -Condition ($moduleSourceText.Contains('GIT_CONFIG_NOSYSTEM') -and $moduleSourceText.Contains('GIT_CONFIG_GLOBAL')) -Name 'Installer isolates system and user Git configuration'
 Assert-True -Condition ($moduleSourceText.Contains('uninstall --global openclaw --ignore-scripts')) -Name 'Exact-version repair disables package lifecycle scripts during removal'
 Assert-True -Condition ($moduleSourceText.Contains('$forceNestedConfirmation') -and $moduleSourceText.Contains('Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true')) -Name 'Explicit confirmation is preserved for nested onboarding changes'
@@ -140,6 +146,7 @@ Assert-True -Condition $? -Name 'WhatIf plans prerequisite and OpenClaw changes 
 
 $trackedCandidates = Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object {
     $_.FullName -notmatch '[\\/]\.git[\\/]' -and
+    $_.FullName -notmatch '[\\/]tests[\\/]\.tmp-' -and
     $_.Extension -in @('.ps1', '.psm1', '.json', '.md', '.yml', '.yaml')
 }
 $secretPatterns = @(
@@ -381,10 +388,16 @@ try {
     $syntheticPackageRoot = Join-Path $exactTemporaryTestRoot 'synthetic-openclaw-package'
     [void](New-Item -ItemType Directory -Path $syntheticPackageRoot -Force)
     $syntheticPackageFile = Join-Path $syntheticPackageRoot 'index.js'
+    $syntheticPackageJsonFile = Join-Path $syntheticPackageRoot 'package.json'
+    $syntheticHelperDirectory = Join-Path $syntheticPackageRoot 'lib'
+    [void](New-Item -ItemType Directory -Path $syntheticHelperDirectory -Force)
+    $syntheticHelperFile = Join-Path $syntheticHelperDirectory 'helper.js'
     $syntheticCommandShim = Join-Path $exactTemporaryTestRoot 'openclaw.cmd'
     $utf8NoBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($syntheticPackageFile, 'module.exports = {};', $utf8NoBom)
-    [IO.File]::WriteAllText($syntheticCommandShim, '@echo off', $utf8NoBom)
+    [IO.File]::WriteAllText($syntheticPackageJsonFile, ('{{"name":"openclaw","version":"{0}","bin":{{"openclaw":"index.js"}}}}' -f $targetOpenClawVersion.ToString()), $utf8NoBom)
+    [IO.File]::WriteAllText($syntheticHelperFile, 'exports.answer = 42;', $utf8NoBom)
+    [IO.File]::WriteAllText($syntheticCommandShim, '@echo off & node node_modules\openclaw\index.js', $utf8NoBom)
     $actualSourceFingerprint = (Get-FileHash -LiteralPath (Join-Path $projectRoot 'config\openclaw-source.json') -Algorithm SHA256).Hash.ToUpperInvariant()
     $syntheticSnapshot = [pscustomobject]@{
         Found = $true
@@ -393,25 +406,156 @@ try {
         ExitCode = 0
         Version = $targetOpenClawVersion
         Path = $syntheticCommandShim
+        EntryPath = $syntheticPackageFile
         PackageRoot = $syntheticPackageRoot
     }
+    $firstMetadataDigest = & $openClawModule {
+        param($packageRootValue)
+        Get-OpenClawPackageTreeMetadataDigest -PackageRoot $packageRootValue
+    } $syntheticPackageRoot
+    $secondMetadataDigest = & $openClawModule {
+        param($packageRootValue)
+        Get-OpenClawPackageTreeMetadataDigest -PackageRoot $packageRootValue
+    } $syntheticPackageRoot
+    Assert-Equal -Actual $secondMetadataDigest.Sha256 -Expected $firstMetadataDigest.Sha256 -Name 'Package metadata tree digest is deterministic'
+    Assert-Equal -Actual $secondMetadataDigest.FileCount -Expected 3 -Name 'Package metadata tree digest counts package files'
+
     $provenanceStateRoot = Join-Path $exactTemporaryTestRoot 'provenance-state'
     $provenanceReceiptPath = & $openClawModule {
         param($snapshotValue, $targetVersionValue, $fingerprintValue, $stateDirectoryValue)
         Write-OpenClawProvenanceReceipt -Snapshot $snapshotValue -TargetVersion $targetVersionValue -SourceFingerprint $fingerprintValue -StateDirectory $stateDirectoryValue
     } $syntheticSnapshot $targetOpenClawVersion $actualSourceFingerprint $provenanceStateRoot
     Assert-True -Condition (Test-Path -LiteralPath $provenanceReceiptPath -PathType Leaf) -Name 'Provenance receipt is written for a trusted exact-version package'
+    $provenanceReceipt = Get-Content -LiteralPath $provenanceReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Equal -Actual ([int]$provenanceReceipt.schemaVersion) -Expected 2 -Name 'Provenance receipt uses the metadata-cache schema'
+    Assert-Equal -Actual ([string]$provenanceReceipt.packageMetadataTreeSha256) -Expected $firstMetadataDigest.Sha256 -Name 'Provenance receipt stamps the deterministic package metadata tree'
+    Assert-Equal -Actual ([string]$provenanceReceipt.packageEntryPointRelativePath) -Expected 'index.js' -Name 'Provenance receipt stamps the package entrypoint path'
+    Assert-Equal -Actual ([string]$provenanceReceipt.packageEntryPointSha256) -Expected (Get-FileHash -LiteralPath $syntheticPackageFile -Algorithm SHA256).Hash.ToUpperInvariant() -Name 'Provenance receipt stamps the package entrypoint content'
+    Assert-Equal -Actual ([string]$provenanceReceipt.packageJsonSha256) -Expected (Get-FileHash -LiteralPath $syntheticPackageJsonFile -Algorithm SHA256).Hash.ToUpperInvariant() -Name 'Provenance receipt stamps package metadata content'
+    Assert-Equal -Actual ([string]$provenanceReceipt.commandShimSha256) -Expected (Get-FileHash -LiteralPath $syntheticCommandShim -Algorithm SHA256).Hash.ToUpperInvariant() -Name 'Provenance receipt stamps the command shim content'
+
     $validProvenanceReceipt = & $openClawModule {
         param($snapshotValue, $stateDirectoryValue)
         Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
     } $syntheticSnapshot $provenanceStateRoot
     Assert-True -Condition $validProvenanceReceipt.Valid -Name 'Provenance receipt validates after a write-read roundtrip'
-    [IO.File]::AppendAllText($syntheticPackageFile, "`n// tampered", $utf8NoBom)
+    Assert-Equal -Actual $validProvenanceReceipt.VerificationMode -Expected 'MetadataCache' -Name 'Unchanged package validation uses the metadata cache'
+
+    $escapedEntrySnapshot = [pscustomobject]@{
+        Found = $true
+        Trusted = $true
+        Ambiguous = $false
+        ExitCode = 0
+        Version = $targetOpenClawVersion
+        Path = $syntheticCommandShim
+        EntryPath = $syntheticCommandShim
+        PackageRoot = $syntheticPackageRoot
+    }
+    $escapedEntryException = Get-ThrownException {
+        [void](& $openClawModule {
+            param($snapshotValue)
+            Get-OpenClawCriticalPackageDigests -Snapshot $snapshotValue
+        } $escapedEntrySnapshot)
+    }
+    Assert-True -Condition ($null -ne $escapedEntryException) -Name 'Critical entrypoint hashing rejects paths outside the package root'
+
+    $helperOriginalBytes = [IO.File]::ReadAllBytes($syntheticHelperFile)
+    $helperCreationTimeUtc = [IO.File]::GetCreationTimeUtc($syntheticHelperFile)
+    $helperLastWriteTimeUtc = [IO.File]::GetLastWriteTimeUtc($syntheticHelperFile)
+    $helperAttributes = [IO.File]::GetAttributes($syntheticHelperFile)
+    [IO.File]::SetLastWriteTimeUtc($syntheticHelperFile, $helperLastWriteTimeUtc.AddSeconds(2))
+    $metadataOnlyProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition $metadataOnlyProvenanceReceipt.Valid -Name 'Metadata-only package change falls back to the retained full digest'
+    Assert-Equal -Actual $metadataOnlyProvenanceReceipt.VerificationMode -Expected 'FullFallback' -Name 'Metadata-only package change reports full-digest fallback'
+    [IO.File]::SetCreationTimeUtc($syntheticHelperFile, $helperCreationTimeUtc)
+    [IO.File]::SetLastWriteTimeUtc($syntheticHelperFile, $helperLastWriteTimeUtc)
+    [IO.File]::SetAttributes($syntheticHelperFile, $helperAttributes)
+
+    [IO.File]::AppendAllText($syntheticHelperFile, "`n// tampered", $utf8NoBom)
     $tamperedProvenanceReceipt = & $openClawModule {
         param($snapshotValue, $stateDirectoryValue)
         Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
     } $syntheticSnapshot $provenanceStateRoot
     Assert-True -Condition (-not $tamperedProvenanceReceipt.Valid) -Name 'Provenance receipt detects package file tampering'
+    Assert-Equal -Actual $tamperedProvenanceReceipt.VerificationMode -Expected 'FullFallback' -Name 'Ordinary package tampering is rejected by full-digest fallback'
+    [IO.File]::WriteAllBytes($syntheticHelperFile, $helperOriginalBytes)
+    [IO.File]::SetCreationTimeUtc($syntheticHelperFile, $helperCreationTimeUtc)
+    [IO.File]::SetLastWriteTimeUtc($syntheticHelperFile, $helperLastWriteTimeUtc)
+    [IO.File]::SetAttributes($syntheticHelperFile, $helperAttributes)
+
+    $entryOriginalBytes = [IO.File]::ReadAllBytes($syntheticPackageFile)
+    $entryCreationTimeUtc = [IO.File]::GetCreationTimeUtc($syntheticPackageFile)
+    $entryLastWriteTimeUtc = [IO.File]::GetLastWriteTimeUtc($syntheticPackageFile)
+    $entryAttributes = [IO.File]::GetAttributes($syntheticPackageFile)
+    $entryTamperedBytes = [byte[]]$entryOriginalBytes.Clone()
+    $entryTamperedBytes[0] = [byte]($entryTamperedBytes[0] -bxor 1)
+    [IO.File]::WriteAllBytes($syntheticPackageFile, $entryTamperedBytes)
+    [IO.File]::SetCreationTimeUtc($syntheticPackageFile, $entryCreationTimeUtc)
+    [IO.File]::SetLastWriteTimeUtc($syntheticPackageFile, $entryLastWriteTimeUtc)
+    [IO.File]::SetAttributes($syntheticPackageFile, $entryAttributes)
+    $entryTamperMetadataDigest = & $openClawModule {
+        param($packageRootValue)
+        Get-OpenClawPackageTreeMetadataDigest -PackageRoot $packageRootValue
+    } $syntheticPackageRoot
+    Assert-Equal -Actual $entryTamperMetadataDigest.Sha256 -Expected ([string]$provenanceReceipt.packageMetadataTreeSha256) -Name 'Same-size and same-metadata entrypoint tamper bypasses only the metadata signal'
+    $entryTamperProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition (-not $entryTamperProvenanceReceipt.Valid) -Name 'Entrypoint content hash rejects same-metadata tampering'
+    Assert-Equal -Actual $entryTamperProvenanceReceipt.VerificationMode -Expected 'CriticalFiles' -Name 'Entrypoint tampering is rejected before metadata-cache acceptance'
+    [IO.File]::WriteAllBytes($syntheticPackageFile, $entryOriginalBytes)
+    [IO.File]::SetCreationTimeUtc($syntheticPackageFile, $entryCreationTimeUtc)
+    [IO.File]::SetLastWriteTimeUtc($syntheticPackageFile, $entryLastWriteTimeUtc)
+    [IO.File]::SetAttributes($syntheticPackageFile, $entryAttributes)
+
+    $packageJsonOriginalBytes = [IO.File]::ReadAllBytes($syntheticPackageJsonFile)
+    $packageJsonCreationTimeUtc = [IO.File]::GetCreationTimeUtc($syntheticPackageJsonFile)
+    $packageJsonLastWriteTimeUtc = [IO.File]::GetLastWriteTimeUtc($syntheticPackageJsonFile)
+    $packageJsonAttributes = [IO.File]::GetAttributes($syntheticPackageJsonFile)
+    $packageJsonTamperedBytes = [byte[]]$packageJsonOriginalBytes.Clone()
+    $packageJsonTamperedBytes[0] = [byte]($packageJsonTamperedBytes[0] -bxor 1)
+    [IO.File]::WriteAllBytes($syntheticPackageJsonFile, $packageJsonTamperedBytes)
+    [IO.File]::SetCreationTimeUtc($syntheticPackageJsonFile, $packageJsonCreationTimeUtc)
+    [IO.File]::SetLastWriteTimeUtc($syntheticPackageJsonFile, $packageJsonLastWriteTimeUtc)
+    [IO.File]::SetAttributes($syntheticPackageJsonFile, $packageJsonAttributes)
+    $packageJsonTamperProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition (-not $packageJsonTamperProvenanceReceipt.Valid) -Name 'Package metadata content hash rejects same-metadata tampering'
+    Assert-Equal -Actual $packageJsonTamperProvenanceReceipt.VerificationMode -Expected 'CriticalFiles' -Name 'Package metadata tampering is rejected before metadata-cache acceptance'
+    [IO.File]::WriteAllBytes($syntheticPackageJsonFile, $packageJsonOriginalBytes)
+    [IO.File]::SetCreationTimeUtc($syntheticPackageJsonFile, $packageJsonCreationTimeUtc)
+    [IO.File]::SetLastWriteTimeUtc($syntheticPackageJsonFile, $packageJsonLastWriteTimeUtc)
+    [IO.File]::SetAttributes($syntheticPackageJsonFile, $packageJsonAttributes)
+
+    $shimOriginalBytes = [IO.File]::ReadAllBytes($syntheticCommandShim)
+    $shimTamperedBytes = [byte[]]$shimOriginalBytes.Clone()
+    $shimTamperedBytes[0] = [byte]($shimTamperedBytes[0] -bxor 1)
+    [IO.File]::WriteAllBytes($syntheticCommandShim, $shimTamperedBytes)
+    $shimTamperProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition (-not $shimTamperProvenanceReceipt.Valid) -Name 'Command shim content hash rejects tampering'
+    Assert-Equal -Actual $shimTamperProvenanceReceipt.VerificationMode -Expected 'CriticalFiles' -Name 'Command shim tampering is rejected before metadata-cache acceptance'
+    [IO.File]::WriteAllBytes($syntheticCommandShim, $shimOriginalBytes)
+
+    $currentReceiptJson = Get-Content -LiteralPath $provenanceReceiptPath -Raw -Encoding UTF8
+    $legacyReceipt = $currentReceiptJson | ConvertFrom-Json
+    $legacyReceipt.schemaVersion = 1
+    [IO.File]::WriteAllText($provenanceReceiptPath, ($legacyReceipt | ConvertTo-Json -Depth 4), $utf8NoBom)
+    $legacyProvenanceReceipt = & $openClawModule {
+        param($snapshotValue, $stateDirectoryValue)
+        Test-OpenClawProvenanceReceipt -Snapshot $snapshotValue -StateDirectory $stateDirectoryValue
+    } $syntheticSnapshot $provenanceStateRoot
+    Assert-True -Condition (-not $legacyProvenanceReceipt.Valid) -Name 'Legacy provenance receipts fail closed instead of bypassing metadata-cache fields'
+    Assert-Equal -Actual $legacyProvenanceReceipt.VerificationMode -Expected 'None' -Name 'Legacy provenance receipts are rejected before package execution checks'
+    [IO.File]::WriteAllText($provenanceReceiptPath, $currentReceiptJson, $utf8NoBom)
 
     Remove-Item -LiteralPath $corruptCheckpointPath -Force
     Remove-Item -LiteralPath $schemaCheckpointPath -Force

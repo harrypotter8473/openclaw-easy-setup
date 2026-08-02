@@ -2,6 +2,7 @@
 
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:DefaultSourceConfigPath = Join-Path $script:ProjectRoot 'config\openclaw-source.json'
+$script:PackageTreeHasherSourcePath = Join-Path $PSScriptRoot 'PackageIntegrity\OpenClawEasySetup.PackageTreeHasher.cs'
 $recoveryModulePath = Join-Path $PSScriptRoot 'OpenClawEasySetup.Recovery.ps1'
 if (-not (Test-Path -LiteralPath $recoveryModulePath -PathType Leaf)) {
     throw "Recovery module was not found: $recoveryModulePath"
@@ -307,6 +308,26 @@ function Get-OpenClawPackageSnapshot {
     }
 }
 
+function Initialize-OpenClawPackageTreeHasher {
+    [CmdletBinding()]
+    param()
+
+    if ($null -eq ('OpenClawEasySetup.Integrity.PackageTreeHasher' -as [type])) {
+        $sourcePath = [IO.Path]::GetFullPath($script:PackageTreeHasherSourcePath)
+        $sourcePrefix = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if (-not $sourcePath.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw 'The package integrity helper source was not found in the trusted module directory.'
+        }
+        $sourceItem = Get-Item -LiteralPath $sourcePath -Force
+        if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $sourceItem.Length -le 0 -or $sourceItem.Length -gt 64KB) {
+            throw 'The package integrity helper source was unsafe.'
+        }
+        Add-Type -Path $sourcePath -ErrorAction Stop
+    }
+}
+
 function Get-OpenClawPackageTreeDigest {
     [CmdletBinding()]
     param(
@@ -314,52 +335,60 @@ function Get-OpenClawPackageTreeDigest {
         [string]$PackageRoot
     )
 
-    $root = [IO.Path]::GetFullPath($PackageRoot)
-    $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
-    if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    Initialize-OpenClawPackageTreeHasher
+    return [OpenClawEasySetup.Integrity.PackageTreeHasher]::Compute([IO.Path]::GetFullPath($PackageRoot))
+}
+
+function Get-OpenClawPackageTreeMetadataDigest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackageRoot
+    )
+
+    Initialize-OpenClawPackageTreeHasher
+    return [OpenClawEasySetup.Integrity.PackageTreeHasher]::ComputeMetadata([IO.Path]::GetFullPath($PackageRoot))
+}
+
+function Get-OpenClawCriticalPackageDigests {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Snapshot
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$Snapshot.PackageRoot) -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.EntryPath) -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.Path)) {
+        throw 'The OpenClaw critical package paths were incomplete.'
+    }
+
+    $packageRoot = [IO.Path]::GetFullPath([string]$Snapshot.PackageRoot)
+    $packageRootItem = Get-Item -LiteralPath $packageRoot -Force -ErrorAction Stop
+    if (-not $packageRootItem.PSIsContainer -or
+        ($packageRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'The OpenClaw package root was not a normal directory.'
     }
 
-    $items = @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)
-    if (@($items | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -gt 0) {
-        throw 'The OpenClaw package tree contained a reparse point.'
+    $packagePrefix = $packageRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $entryPath = [IO.Path]::GetFullPath([string]$Snapshot.EntryPath)
+    $packageJsonPath = [IO.Path]::GetFullPath((Join-Path $packageRoot 'package.json'))
+    if (-not $entryPath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $packageJsonPath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'An OpenClaw critical package file left the package root.'
     }
 
-    $files = @($items | Where-Object { -not $_.PSIsContainer } | Sort-Object FullName)
-    if ($files.Count -eq 0 -or $files.Count -gt 50000) {
-        throw 'The OpenClaw package tree contained an unexpected number of files.'
-    }
-
-    $rootPrefix = $root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    $manifest = New-Object Text.StringBuilder
-    $totalBytes = [int64]0
-    foreach ($file in $files) {
-        $fullPath = [IO.Path]::GetFullPath($file.FullName)
-        if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'An OpenClaw package file left the package root.'
-        }
-        $totalBytes += [int64]$file.Length
-        if ($totalBytes -gt 2GB) {
-            throw 'The OpenClaw package tree exceeded the integrity size limit.'
-        }
-        $relativePath = $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
-        $fileHash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToUpperInvariant()
-        [void]$manifest.Append($relativePath).Append([char]0).Append([string]$file.Length).Append([char]0).Append($fileHash).Append("`n")
-    }
-
-    $sha256 = [Security.Cryptography.SHA256]::Create()
-    try {
-        $manifestBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($manifest.ToString())
-        $treeHash = ([BitConverter]::ToString($sha256.ComputeHash($manifestBytes))).Replace('-', '')
-    }
-    finally {
-        $sha256.Dispose()
-    }
+    $commandPath = [IO.Path]::GetFullPath([string]$Snapshot.Path)
+    Initialize-OpenClawPackageTreeHasher
+    $commandShimSha256 = [OpenClawEasySetup.Integrity.PackageTreeHasher]::ComputeFile($commandPath, [int64](64KB))
+    $packageEntryPointSha256 = [OpenClawEasySetup.Integrity.PackageTreeHasher]::ComputeFile($entryPath, [int64](256MB))
+    $packageJsonSha256 = [OpenClawEasySetup.Integrity.PackageTreeHasher]::ComputeFile($packageJsonPath, [int64](1MB))
 
     return [pscustomobject]@{
-        Sha256 = $treeHash
-        FileCount = $files.Count
-        TotalBytes = $totalBytes
+        CommandShimSha256 = $commandShimSha256
+        PackageEntryPointSha256 = $packageEntryPointSha256
+        PackageJsonSha256 = $packageJsonSha256
+        PackageEntryPointRelativePath = $entryPath.Substring($packagePrefix.Length).Replace('\', '/')
     }
 }
 
@@ -435,12 +464,20 @@ function Write-OpenClawProvenanceReceipt {
 
     if (-not $Snapshot.Found -or -not $Snapshot.Trusted -or $Snapshot.Ambiguous -or
         $Snapshot.ExitCode -ne 0 -or $null -eq $Snapshot.Version -or $Snapshot.Version -ne $TargetVersion -or
-        [string]::IsNullOrWhiteSpace([string]$Snapshot.Path) -or [string]::IsNullOrWhiteSpace([string]$Snapshot.PackageRoot)) {
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.Path) -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.EntryPath) -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.PackageRoot)) {
         throw 'A provenance receipt can only be written for the exact trusted OpenClaw target.'
     }
 
     $treeDigest = Get-OpenClawPackageTreeDigest -PackageRoot $Snapshot.PackageRoot
-    $shimHash = (Get-FileHash -LiteralPath $Snapshot.Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $criticalDigests = Get-OpenClawCriticalPackageDigests -Snapshot $Snapshot
+    $finalMetadataDigest = Get-OpenClawPackageTreeMetadataDigest -PackageRoot $Snapshot.PackageRoot
+    if ($treeDigest.MetadataSha256 -ne $finalMetadataDigest.Sha256 -or
+        $treeDigest.FileCount -ne $finalMetadataDigest.FileCount -or
+        $treeDigest.TotalBytes -ne $finalMetadataDigest.TotalBytes) {
+        throw 'The OpenClaw package tree changed while its provenance receipt was being created.'
+    }
     $userSid = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     }
@@ -452,15 +489,19 @@ function Write-OpenClawProvenanceReceipt {
     $temporaryPath = Join-Path $directories.State ("provenance.{0}.tmp" -f ([guid]::NewGuid().ToString('N')))
     $backupPath = Join-Path $directories.State ("provenance.{0}.bak" -f ([guid]::NewGuid().ToString('N')))
     $receipt = [ordered]@{
-        schemaVersion = 1
-        toolVersion = '0.3.0'
+        schemaVersion = 2
+        toolVersion = '0.4.0'
         targetVersion = $TargetVersion.ToString()
         sourceFingerprint = $SourceFingerprint.ToUpperInvariant()
         userSid = $userSid
         packageTreeSha256 = $treeDigest.Sha256
+        packageMetadataTreeSha256 = $finalMetadataDigest.Sha256
         packageFileCount = $treeDigest.FileCount
         packageTotalBytes = $treeDigest.TotalBytes
-        commandShimSha256 = $shimHash
+        commandShimSha256 = $criticalDigests.CommandShimSha256
+        packageEntryPointSha256 = $criticalDigests.PackageEntryPointSha256
+        packageEntryPointRelativePath = $criticalDigests.PackageEntryPointRelativePath
+        packageJsonSha256 = $criticalDigests.PackageJsonSha256
         createdAtUtc = [DateTime]::UtcNow.ToString('o')
     }
 
@@ -513,8 +554,8 @@ function Test-OpenClawProvenanceReceipt {
     )
 
     $invalid = {
-        param([string]$Reason, [string]$Path)
-        [pscustomobject]@{ Valid = $false; Reason = $Reason; Path = $Path }
+        param([string]$Reason, [string]$Path, [string]$VerificationMode = 'None')
+        [pscustomobject]@{ Valid = $false; Reason = $Reason; Path = $Path; VerificationMode = $VerificationMode }
     }
     try {
         $paths = Get-OpenClawExistingStatePaths -StateDirectory $StateDirectory
@@ -549,12 +590,19 @@ function Test-OpenClawProvenanceReceipt {
         else {
             'non-windows'
         }
-        if ([int]$receipt.schemaVersion -ne 1 -or
+        if ([int]$receipt.schemaVersion -ne 2 -or
             [string]$receipt.targetVersion -notmatch '^\d{4}\.\d+\.\d+$' -or
             [string]$receipt.sourceFingerprint -ne $sourceFingerprint -or
             [string]$receipt.userSid -ne $currentSid -or
             [string]$receipt.packageTreeSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
-            [string]$receipt.commandShimSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            [string]$receipt.packageMetadataTreeSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [string]$receipt.commandShimSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [string]$receipt.packageEntryPointSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [string]$receipt.packageJsonSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [string]::IsNullOrWhiteSpace([string]$receipt.packageEntryPointRelativePath) -or
+            [string]$receipt.packageEntryPointRelativePath -match '(^/|\\|(^|/)\.\.(/|$))' -or
+            [int]$receipt.packageFileCount -le 0 -or [int]$receipt.packageFileCount -gt 50000 -or
+            [int64]$receipt.packageTotalBytes -le 0 -or [int64]$receipt.packageTotalBytes -gt 2GB) {
             return & $invalid 'The OpenClaw installation provenance receipt did not match this tool or user.' $receiptPath
         }
         if (-not $Snapshot.Found -or -not $Snapshot.Trusted -or $Snapshot.Ambiguous -or
@@ -562,15 +610,34 @@ function Test-OpenClawProvenanceReceipt {
             $Snapshot.Version.ToString() -ne [string]$receipt.targetVersion) {
             return & $invalid 'The installed OpenClaw version did not match its provenance receipt.' $receiptPath
         }
+
+        $criticalDigests = Get-OpenClawCriticalPackageDigests -Snapshot $Snapshot
+        if ($criticalDigests.CommandShimSha256 -ne ([string]$receipt.commandShimSha256).ToUpperInvariant() -or
+            $criticalDigests.PackageEntryPointSha256 -ne ([string]$receipt.packageEntryPointSha256).ToUpperInvariant() -or
+            $criticalDigests.PackageJsonSha256 -ne ([string]$receipt.packageJsonSha256).ToUpperInvariant() -or
+            $criticalDigests.PackageEntryPointRelativePath -cne [string]$receipt.packageEntryPointRelativePath) {
+            return & $invalid 'The installed OpenClaw files changed after their verified installation.' $receiptPath 'CriticalFiles'
+        }
+
+        $metadataDigest = Get-OpenClawPackageTreeMetadataDigest -PackageRoot $Snapshot.PackageRoot
+        if ($metadataDigest.Sha256 -eq ([string]$receipt.packageMetadataTreeSha256).ToUpperInvariant() -and
+            $metadataDigest.FileCount -eq [int]$receipt.packageFileCount -and
+            $metadataDigest.TotalBytes -eq [int64]$receipt.packageTotalBytes) {
+            return [pscustomobject]@{ Valid = $true; Reason = ''; Path = $receiptPath; VerificationMode = 'MetadataCache' }
+        }
+
         $treeDigest = Get-OpenClawPackageTreeDigest -PackageRoot $Snapshot.PackageRoot
-        $shimHash = (Get-FileHash -LiteralPath $Snapshot.Path -Algorithm SHA256).Hash.ToUpperInvariant()
+        $finalCriticalDigests = Get-OpenClawCriticalPackageDigests -Snapshot $Snapshot
         if ($treeDigest.Sha256 -ne ([string]$receipt.packageTreeSha256).ToUpperInvariant() -or
             $treeDigest.FileCount -ne [int]$receipt.packageFileCount -or
             $treeDigest.TotalBytes -ne [int64]$receipt.packageTotalBytes -or
-            $shimHash -ne ([string]$receipt.commandShimSha256).ToUpperInvariant()) {
-            return & $invalid 'The installed OpenClaw files changed after their verified installation.' $receiptPath
+            $finalCriticalDigests.CommandShimSha256 -ne ([string]$receipt.commandShimSha256).ToUpperInvariant() -or
+            $finalCriticalDigests.PackageEntryPointSha256 -ne ([string]$receipt.packageEntryPointSha256).ToUpperInvariant() -or
+            $finalCriticalDigests.PackageJsonSha256 -ne ([string]$receipt.packageJsonSha256).ToUpperInvariant() -or
+            $finalCriticalDigests.PackageEntryPointRelativePath -cne [string]$receipt.packageEntryPointRelativePath) {
+            return & $invalid 'The installed OpenClaw files changed after their verified installation.' $receiptPath 'FullFallback'
         }
-        return [pscustomobject]@{ Valid = $true; Reason = ''; Path = $receiptPath }
+        return [pscustomobject]@{ Valid = $true; Reason = ''; Path = $receiptPath; VerificationMode = 'FullFallback' }
     }
     catch {
         return & $invalid 'The OpenClaw installation provenance could not be verified.' $null
@@ -1064,7 +1131,7 @@ function Save-OpenClawInstaller {
     $handler.AllowAutoRedirect = $false
     $client = New-Object System.Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(60)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd('OpenClaw-Easy-Setup/0.3')
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('OpenClaw-Easy-Setup/0.4')
     $currentUri = $initialUri
     $response = $null
 
@@ -2092,6 +2159,8 @@ Export-ModuleMember -Function @(
     'Save-OpenClawInstaller',
     'Install-OpenClawGitPrerequisite',
     'Install-OpenClawNodePrerequisite',
+    'Update-OpenClawProcessPath',
+    'Resolve-OpenClawInvocation',
     'Start-OpenClawOnboarding',
     'Install-OpenClawOfficial',
     'Invoke-OpenClawVerification'

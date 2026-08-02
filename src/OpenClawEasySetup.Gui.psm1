@@ -1,14 +1,18 @@
 Set-StrictMode -Version Latest
 
-$script:GuiVersion = '0.3.0'
+$script:GuiVersion = '0.4.0'
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:EngineModulePath = Join-Path $PSScriptRoot 'OpenClawEasySetup.psm1'
 $script:EntryPointPath = Join-Path $script:ProjectRoot 'OpenClawEasySetup.ps1'
+$script:SettingsGuiPath = Join-Path $script:ProjectRoot 'OpenClawEasySetup.Settings.Gui.ps1'
 $script:LocalePath = Join-Path $script:ProjectRoot 'locales\ko-KR.json'
 $script:GuiStageIds = @('diagnose', 'node', 'download', 'integrity', 'dryRun', 'install', 'onboard', 'verify')
 
 if (-not (Test-Path -LiteralPath $script:EngineModulePath -PathType Leaf)) {
     throw "OpenClaw engine module was not found: $script:EngineModulePath"
+}
+if (-not (Test-Path -LiteralPath $script:SettingsGuiPath -PathType Leaf)) {
+    throw "OpenClaw settings GUI was not found: $script:SettingsGuiPath"
 }
 Import-Module -Name $script:EngineModulePath -Force -ErrorAction Stop
 
@@ -418,16 +422,21 @@ function New-OpenClawGuiWorkerInvocation {
         throw 'The diagnostic bundle destination was not selected.'
     }
 
-    $interactive = $Action -eq 'Configure'
+    $interactive = $false
     $arguments = New-Object System.Collections.Generic.List[string]
     foreach ($argument in @('-NoLogo', '-NoProfile')) {
         $arguments.Add($argument)
     }
-    if (-not $interactive) {
-        $arguments.Add('-NonInteractive')
+    $arguments.Add('-NonInteractive')
+    if ($Action -eq 'Configure') {
+        foreach ($argument in @('-STA', '-File', $script:SettingsGuiPath)) {
+            $arguments.Add([string]$argument)
+        }
     }
-    foreach ($argument in @('-File', $script:EntryPointPath, '-Action', $(if ($Action -eq 'Resume') { 'Install' } else { $Action }))) {
-        $arguments.Add([string]$argument)
+    else {
+        foreach ($argument in @('-File', $script:EntryPointPath, '-Action', $(if ($Action -eq 'Resume') { 'Install' } else { $Action }))) {
+            $arguments.Add([string]$argument)
+        }
     }
 
     if ($Action -eq 'Diagnose') {
@@ -445,11 +454,6 @@ function New-OpenClawGuiWorkerInvocation {
             foreach ($argument in @('-CancellationPath', [IO.Path]::GetFullPath($CancellationPath))) {
                 $arguments.Add([string]$argument)
             }
-        }
-    }
-    elseif ($Action -eq 'Configure') {
-        foreach ($argument in @('-Apply', '-GuiApproved')) {
-            $arguments.Add($argument)
         }
     }
     elseif ($Action -eq 'Bundle') {

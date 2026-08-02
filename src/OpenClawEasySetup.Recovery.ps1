@@ -1,7 +1,7 @@
 ﻿Set-StrictMode -Version Latest
 
 $script:RecoverySchemaVersion = 1
-$script:RecoveryToolVersion = '0.3.0'
+$script:RecoveryToolVersion = '0.4.0'
 $script:InstallStageIds = @('diagnose', 'node', 'download', 'integrity', 'dryRun', 'install', 'onboard', 'verify')
 $script:ExitCodeDefinitions = @{
     Success = [pscustomobject]@{ Kind = 'Success'; Id = 'OCES-SUCCESS'; ExitCode = 0; Message = '작업을 완료했습니다.'; Guidance = '' }

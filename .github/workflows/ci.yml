@@ -28,6 +28,14 @@ jobs:
         shell: powershell
         run: ./tests/Run-Tests.ps1
 
+      - name: Test safe settings with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-SettingsTests.ps1
+
+      - name: Test native credential resolver with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-CredentialResolverTests.ps1
+
       - name: Test GUI with Windows PowerShell 5.1
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -Sta -File ./tests/Run-GuiTests.ps1
@@ -35,6 +43,10 @@ jobs:
       - name: Test with PowerShell 7
         shell: pwsh
         run: ./tests/Run-Tests.ps1
+
+      - name: Test safe settings with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-SettingsTests.ps1
 
       - name: Test GUI with PowerShell 7
         shell: pwsh

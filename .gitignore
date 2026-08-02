@@ -19,6 +19,7 @@ logs/
 # PowerShell and test output
 TestResults/
 coverage/
+tests/.tmp-*/
 
 # Editors and operating systems
 .idea/
