@@ -11,6 +11,15 @@ param(
 
     [string]$DiagnosticOutputPath,
 
+    [string]$CancellationPath,
+
+    [ValidatePattern('^[A-Fa-f0-9]{64}$')]
+    [string]$ExpectedPlanFingerprint,
+
+    [switch]$GuiApproved,
+
+    [switch]$GuiOutput,
+
     [switch]$SkipOnboarding,
     [switch]$Strict
 )
@@ -62,6 +71,7 @@ $interactiveApproval = $false
 $planAlreadyShown = $false
 $logPath = $null
 $installLock = $null
+$sourceConfigLock = $null
 $confirmWasBound = $PSBoundParameters.ContainsKey('Confirm')
 $explicitConfirm = if ($confirmWasBound) { [bool]$PSBoundParameters['Confirm'] } else { $false }
 
@@ -93,6 +103,34 @@ try {
         $resumeException = New-Object InvalidOperationException('Resume can only be used with the Install action.')
         $resumeException.Data['OpenClawFailureKind'] = 'Resume'
         throw $resumeException
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CancellationPath) -and $Action -ne 'Install') {
+        $cancellationException = New-Object InvalidOperationException('CancellationPath can only be used with the Install action.')
+        $cancellationException.Data['OpenClawFailureKind'] = 'Resume'
+        throw $cancellationException
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedPlanFingerprint) -and $Action -ne 'Install') {
+        $planException = New-Object InvalidOperationException('ExpectedPlanFingerprint can only be used with the Install action.')
+        $planException.Data['OpenClawFailureKind'] = 'Integrity'
+        throw $planException
+    }
+    if ($GuiApproved -and $Action -notin @('Install', 'Configure')) {
+        $guiApprovalException = New-Object InvalidOperationException('GuiApproved can only be used with Install or Configure.')
+        $guiApprovalException.Data['OpenClawFailureKind'] = 'Unexpected'
+        throw $guiApprovalException
+    }
+    if ($GuiApproved -and $Action -eq 'Install' -and [string]::IsNullOrWhiteSpace($ExpectedPlanFingerprint)) {
+        $guiPlanException = New-Object InvalidOperationException('GUI installation approval requires an expected plan fingerprint.')
+        $guiPlanException.Data['OpenClawFailureKind'] = 'Integrity'
+        throw $guiPlanException
+    }
+    if ($GuiOutput -and $Action -ne 'Diagnose') {
+        $guiOutputException = New-Object InvalidOperationException('GuiOutput can only be used with Diagnose.')
+        $guiOutputException.Data['OpenClawFailureKind'] = 'Unexpected'
+        throw $guiOutputException
+    }
+    if ($GuiOutput) {
+        [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
     }
 
     switch ($Action) {
@@ -129,6 +167,17 @@ try {
                 return
             }
 
+            if (-not [string]::IsNullOrWhiteSpace($ExpectedPlanFingerprint)) {
+                $sourceConfigLock = Enter-OpenClawSourceConfigReadLock
+                $planMode = if ($Resume) { 'Resume' } else { 'Install' }
+                $currentPlanFingerprint = Get-OpenClawPlanFingerprint -Mode $planMode
+                if (-not [string]::Equals($currentPlanFingerprint, $ExpectedPlanFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
+                    $planChangedException = New-Object InvalidOperationException('The approved installation plan changed before execution.')
+                    $planChangedException.Data['OpenClawFailureKind'] = 'Integrity'
+                    throw $planChangedException
+                }
+            }
+
             if (-not $WhatIfPreference) {
                 $runtimeDirectories = Initialize-OpenClawStateDirectory -Path $StateDirectory
                 $installLockPath = Join-Path $runtimeDirectories.State 'install.lock'
@@ -156,9 +205,10 @@ try {
                 InteractiveApproval = $interactiveApproval
                 StateDirectory = $StateDirectory
                 LogPath = $logPath
+                CancellationPath = $CancellationPath
                 WhatIf = $WhatIfPreference
             }
-            if ($interactiveApproval) {
+            if ($interactiveApproval -or $GuiApproved) {
                 $installParameters['Confirm'] = $false
             }
             elseif ($confirmWasBound) {
@@ -185,7 +235,7 @@ try {
                 StateDirectory = $StateDirectory
                 WhatIf = $WhatIfPreference
             }
-            if ($interactiveApproval) {
+            if ($interactiveApproval -or $GuiApproved) {
                 $configurationParameters['Confirm'] = $false
             }
             elseif ($confirmWasBound) {
@@ -250,5 +300,18 @@ catch {
 finally {
     if ($null -ne $installLock) {
         $installLock.Dispose()
+    }
+    if ($null -ne $sourceConfigLock) {
+        $sourceConfigLock.Dispose()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CancellationPath)) {
+        try {
+            if (Test-Path -LiteralPath $CancellationPath -PathType Leaf) {
+                [void](Remove-OpenClawCancellationSignal -Path $CancellationPath -StateDirectory $StateDirectory)
+            }
+        }
+        catch {
+            # A cancellation-signal cleanup failure must not replace the workflow result.
+        }
     }
 }

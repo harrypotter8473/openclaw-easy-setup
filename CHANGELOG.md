@@ -23,3 +23,10 @@
 - Script-disabled repair reinstall for exact-version packages without a valid receipt
 - Offline diagnostic ZIP creation with `Bundle` and `-DiagnosticOutputPath`
 - Explicit assurance that logs and diagnostic bundles are never uploaded automatically
+- Korean Windows WPF GUI with a double-click launcher and six beginner-oriented actions
+- Eight-stage checkpoint progress, interrupted-install detection, and one-click resume
+- Default-deny plan approval bound to a SHA-256 plan fingerprint
+- Cooperative cancellation at safe stage boundaries with stable `OCES-CANCELLED-001` reporting
+- Separate non-elevated worker processes and a visible console only for official interactive onboarding
+- System-color, keyboard, DPI, and screen-reader accessibility metadata
+- Dependency-free GUI tests for PowerShell 5.1 and PowerShell 7

@@ -2,10 +2,13 @@
 
 ## 목표
 
-OpenClaw Easy Setup은 초보자용 화면과 실제 시스템 변경 코드를 분리합니다. 현재 복구 가능한 PowerShell CLI는 다음 단계인 데스크톱 GUI에서도 재사용할 수 있는 설치 엔진 역할을 합니다.
+OpenClaw Easy Setup은 초보자용 화면과 실제 시스템 변경 코드를 분리합니다. 한국어 Windows GUI는 복구 가능한 PowerShell CLI를 별도 작업 프로세스로 재사용합니다.
 
 ```text
-사용자 CLI / 다음 단계의 GUI
+한국어 WPF GUI / CLI
+        |
+        v
+계획 지문·기본 거부 승인·별도 작업 프로세스
         |
         v
 진단·계획 계층 (기본 읽기 전용)
@@ -25,17 +28,38 @@ OpenClaw Easy Setup은 초보자용 화면과 실제 시스템 변경 코드를 
 
 ## 구성요소
 
-- `OpenClawEasySetup.ps1`: 초보자용 진입점과 동작 선택
+- `OpenClawEasySetup.ps1`: CLI 메뉴와 GUI 작업 프로세스의 공용 진입점
+- `Start-OpenClawEasySetup.cmd`: 영구 정책 변경 없이 GUI를 여는 더블클릭 실행 파일
+- `OpenClawEasySetup.Gui.ps1`: WPF 화면, 승인·진행·결과·복구 UX와 작업 프로세스 수명 주기
+- `ui/MainWindow.xaml`: 시스템 색상과 DPI 대응 레이아웃
+- `src/OpenClawEasySetup.Gui.psm1`: 읽기 전용 화면 모델, 인수 인코딩, 작업 프로세스·결과 어댑터
 - `src/OpenClawEasySetup.psm1`: 상태 진단, 출처 검증, 복구 가능한 설치, 온보딩, 검증
 - `config/openclaw-source.json`: 코드와 분리된 공식 출처·요구사항
 - `locales/ko-KR.json`: Windows PowerShell 5.1에서도 안전하게 읽는 UTF-8 한국어 메시지
 - `tests/Run-Tests.ps1`: Pester 설치 없이 실행되는 결정적 단위·스모크 테스트
+- `tests/Run-GuiTests.ps1`: 화면을 표시하지 않고 기본 거부·접근성·무변경·재개·취소 경계를 검증하는 STA 테스트
 
 ## 설계 결정
 
 ### PowerShell-first
 
-첫 단계는 별도 앱 런타임을 설치하기 전에 Windows 기본 환경에서 진단할 수 있어야 합니다. 다음 단계에서는 검증된 CLI 동작을 접근성 높은 한국어 Windows GUI로 감쌉니다.
+별도 앱 런타임을 설치하기 전에 Windows 기본 환경에서 진단할 수 있어야 합니다. GUI도 Windows에 포함된 WPF와 Windows PowerShell 5.1만 사용하며, 검증된 CLI 엔진을 다시 구현하지 않고 별도 작업 프로세스로 호출합니다.
+
+### GUI와 설치 프로세스 분리
+
+GUI는 일반 사용자 권한과 STA 스레드에서 실행합니다. 설치·진단·검증은 OS가 제공하는 실제 시스템 디렉터리에서 Windows PowerShell 경로를 만들고, 파일이 재분석 지점이 아니며 Authenticode 서명자가 Microsoft Corporation인지 확인한 뒤 별도 프로세스에서 실행합니다. GUI는 WinGet, npm, 다운로드 함수를 직접 호출하지 않으며 전체 앱에 `runas`를 사용하지 않습니다. 공식 온보딩만 사용자가 입력할 수 있는 별도 콘솔로 열고, 설치 본체는 `-SkipOnboarding`으로 비대화형 실행합니다.
+
+### 계획 승인과 TOCTOU 방어
+
+설치·재개 화면의 동의는 기본적으로 꺼져 있고 시작 버튼도 비활성화되어 있습니다. Enter와 취소 동작은 설치를 시작하지 않습니다. 사용자가 본 8단계 계획은 출처 설정 SHA-256과 변경 의미를 묶은 계획 지문으로 기록되며, CLI 작업 프로세스가 실행 직전에 다시 계산한 지문과 일치할 때만 `-Apply`를 수행합니다.
+
+### 협력적 취소
+
+GUI는 실행 중인 WinGet·npm·설치 프로세스를 강제로 종료하지 않습니다. 개인 ACL이 적용된 상태 폴더의 무작위 이름 신호 파일만 만들고, 엔진은 체크포인트 단계 사이의 안전 경계에서 이 파일을 검증합니다. 취소하면 `OCES-CANCELLED-001`/exit 61로 끝나며 실행 중인 단계가 없는 재개 가능한 체크포인트를 남깁니다.
+
+### 접근성
+
+화면은 Windows `SystemColors` 동적 리소스를 사용해 고대비 설정을 따르고, 스크롤 가능한 DPI 대응 레이아웃과 명시적인 탭 순서를 가집니다. 상태는 색만으로 표현하지 않고 텍스트와 기호를 함께 표시합니다. 모든 대화형 요소에는 한국어 자동화 이름과 도움말이 설정됩니다.
 
 ### 읽기와 쓰기의 분리
 

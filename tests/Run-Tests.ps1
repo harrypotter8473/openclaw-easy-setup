@@ -126,6 +126,10 @@ $entrySourceText = Get-Content -LiteralPath $entryPoint -Raw -Encoding UTF8
 $entryCommand = Get-Command -Name $entryPoint
 Assert-True -Condition $entryCommand.Parameters.ContainsKey('Apply') -Name 'Entry point requires an explicit Apply switch for mutations'
 Assert-True -Condition $entryCommand.Parameters.ContainsKey('WhatIf') -Name 'Entry point exposes standard WhatIf support'
+Assert-True -Condition $entryCommand.Parameters.ContainsKey('CancellationPath') -Name 'Entry point exposes cooperative cancellation for the GUI worker'
+Assert-True -Condition $entryCommand.Parameters.ContainsKey('ExpectedPlanFingerprint') -Name 'Entry point can bind an approved GUI plan fingerprint'
+Assert-True -Condition $entryCommand.Parameters.ContainsKey('GuiApproved') -Name 'Entry point exposes an argv-safe GUI approval switch'
+Assert-True -Condition $entryCommand.Parameters.ContainsKey('GuiOutput') -Name 'Entry point exposes a UTF-8 GUI diagnosis output switch'
 Assert-True -Condition (([regex]::Matches($entrySourceText, '\[''Confirm''\]\s*=\s*\$explicitConfirm')).Count -eq 2) -Name 'Explicit Confirm values cross the entry-point module boundary'
 & $entryPoint -Action Install
 Assert-True -Condition $? -Name 'Install preview completes without starting installation'
@@ -164,6 +168,7 @@ $stableExitCodes = @{
     Configure = 42
     Verify = 50
     Resume = 60
+    Cancelled = 61
     Bundle = 70
     Unexpected = 99
 }

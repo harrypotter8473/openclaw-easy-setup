@@ -98,6 +98,24 @@ function Get-OpenClawSourceConfig {
     return $config
 }
 
+function Enter-OpenClawSourceConfigReadLock {
+    [CmdletBinding()]
+    param()
+
+    $path = [IO.Path]::GetFullPath($script:DefaultSourceConfigPath)
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -le 0 -or $item.Length -gt 256KB) {
+        throw 'The source configuration must be a normal file within the allowed size.'
+    }
+    try {
+        return New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    }
+    catch {
+        $_.Exception.Data['OpenClawFailureKind'] = 'Integrity'
+        throw
+    }
+}
+
 function Test-OpenClawUriAllowed {
     [CmdletBinding()]
     param(
@@ -435,7 +453,7 @@ function Write-OpenClawProvenanceReceipt {
     $backupPath = Join-Path $directories.State ("provenance.{0}.bak" -f ([guid]::NewGuid().ToString('N')))
     $receipt = [ordered]@{
         schemaVersion = 1
-        toolVersion = '0.2.0'
+        toolVersion = '0.3.0'
         targetVersion = $TargetVersion.ToString()
         sourceFingerprint = $SourceFingerprint.ToUpperInvariant()
         userSid = $userSid
@@ -965,6 +983,43 @@ function Get-OpenClawInstallPlan {
     )
 }
 
+function Get-OpenClawPlanFingerprint {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('Install', 'Resume')]
+        [string]$Mode = 'Install'
+    )
+
+    $sourceFingerprint = (Get-FileHash -LiteralPath $script:DefaultSourceConfigPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    $localeFingerprint = (Get-FileHash -LiteralPath (Join-Path $script:ProjectRoot 'locales\ko-KR.json') -Algorithm SHA256).Hash.ToUpperInvariant()
+    $semanticPlan = @(Get-OpenClawInstallPlan | ForEach-Object {
+        [ordered]@{
+            order = [int]$_.Order
+            id = [string]$_.Id
+            changesPC = [bool]$_.ChangesPC
+            requiresAdmin = [string]$_.RequiresAdmin
+            title = [string]$_.Title
+            detail = [string]$_.Detail
+        }
+    })
+    $payload = [ordered]@{
+        schemaVersion = 1
+        mode = $Mode
+        sourceFingerprint = $sourceFingerprint
+        localeFingerprint = $localeFingerprint
+        stages = $semanticPlan
+    } | ConvertTo-Json -Compress -Depth 5
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $encoding.GetBytes($payload)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '')
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
 function Show-OpenClawInstallPlan {
     [CmdletBinding()]
     param(
@@ -1009,7 +1064,7 @@ function Save-OpenClawInstaller {
     $handler.AllowAutoRedirect = $false
     $client = New-Object System.Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(60)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd('OpenClaw-Easy-Setup/0.1')
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('OpenClaw-Easy-Setup/0.3')
     $currentUri = $initialUri
     $response = $null
 
@@ -1567,7 +1622,8 @@ function Install-OpenClawOfficial {
         [switch]$Resume,
         [switch]$InteractiveApproval,
         [string]$StateDirectory,
-        [string]$LogPath
+        [string]$LogPath,
+        [string]$CancellationPath
     )
 
     if (-not (Test-OpenClawIsWindows)) {
@@ -1616,6 +1672,7 @@ function Install-OpenClawOfficial {
         Write-OpenClawLog -Path $LogPath -Level 'Info' -Event 'install.start' -Message 'OpenClaw installation workflow started.' -Data @{ targetVersion = $targetVersion.ToString(); resumed = [bool]$Resume }
     }
 
+    Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
     $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'diagnose' -Status 'Running'
     $readiness = @(Get-OpenClawReadiness)
     $blockingReadiness = @($readiness | Where-Object { $_.Status -eq 'Fail' -and $_.Id -notin @('winget', 'git', 'node', 'npm', 'openclaw') })
@@ -1624,6 +1681,7 @@ function Install-OpenClawOfficial {
         throw (New-OpenClawTaggedException -Kind 'Prerequisite' -Message 'The read-only diagnosis found a blocking prerequisite.')
     }
     $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'diagnose' -Status 'Succeeded'
+    Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
 
     $existing = Get-OpenClawCommandSnapshot -Name 'openclaw'
     $decision = Get-OpenClawInstallDecision -Snapshot $existing -TargetVersion $targetVersion
@@ -1739,6 +1797,7 @@ function Install-OpenClawOfficial {
     }
     $nodeDetail = if ($requiresInstall) { "Git {0}; Node.js {1}" -f $git.Version, $node.Version } else { "Node.js {0}" -f $node.Version }
     $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'node' -Status 'Succeeded' -Detail $nodeDetail
+    Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
 
     if (-not $requiresInstall) {
         if (-not $resumeAfterInstalledStage) {
@@ -1781,6 +1840,7 @@ function Install-OpenClawOfficial {
                 return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
             }
             $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Succeeded'
+            Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
             $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Running'
             try {
                 $verification = @(Invoke-OpenClawVerification -StateDirectory $StateDirectory)
@@ -1799,6 +1859,7 @@ function Install-OpenClawOfficial {
             $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Succeeded'
         }
         else {
+            Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
             $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Running'
             try {
                 $verification = @(Invoke-OpenClawVerification -StateDirectory $StateDirectory)
@@ -1826,6 +1887,7 @@ function Install-OpenClawOfficial {
         return
     }
 
+    Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
     $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'download' -Status 'Running'
     try {
         $artifact = Save-OpenClawInstaller -SourceConfig $sourceConfig
@@ -1848,6 +1910,7 @@ function Install-OpenClawOfficial {
         Write-Host ("Installer SHA-256: {0}" -f $artifact.Sha256)
         Write-Host ("Authenticode status: {0}" -f $artifact.SignatureStatus)
 
+        Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
         $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'dryRun' -Status 'Running'
         try {
             $dryRunExitCode = Invoke-OpenClawPinnedInstallerFile -InstallerPath $artifact.Path -SourceConfig $sourceConfig -DryRun
@@ -1865,6 +1928,7 @@ function Install-OpenClawOfficial {
         }
         $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'dryRun' -Status 'Succeeded'
 
+        Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
         $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Running'
         if ($PSCmdlet.ShouldProcess($artifact.Path, ("Install pinned OpenClaw {0}" -f $targetVersion))) {
             try {
@@ -1896,6 +1960,7 @@ function Install-OpenClawOfficial {
                 throw (New-OpenClawTaggedException -Kind 'Install' -Message 'The installed OpenClaw files could not be recorded for safe later execution.')
             }
             $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail ("OpenClaw {0}" -f $installed.Version)
+            Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
 
             if ($SkipOnboarding) {
                 $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Skipped' -Detail 'Explicitly skipped by user.'
@@ -1926,6 +1991,7 @@ function Install-OpenClawOfficial {
                     return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
                 }
                 $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'onboard' -Status 'Succeeded'
+                Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
                 $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'verify' -Status 'Running'
                 try {
                     $verification = @(Invoke-OpenClawVerification -StateDirectory $StateDirectory)
@@ -2006,16 +2072,22 @@ Export-ModuleMember -Function @(
     'Read-OpenClawCheckpoint',
     'Get-OpenClawLatestCheckpoint',
     'Set-OpenClawCheckpointStep',
+    'New-OpenClawCancellationPath',
+    'Request-OpenClawCancellation',
+    'Test-OpenClawCancellationRequested',
+    'Remove-OpenClawCancellationSignal',
     'Get-OpenClawInstallDecision',
     'Export-OpenClawDiagnosticBundle',
     'ConvertTo-OpenClawVersion',
     'Get-OpenClawSourceConfig',
+    'Enter-OpenClawSourceConfigReadLock',
     'Test-OpenClawUriAllowed',
     'Test-OpenClawNodeVersion',
     'Test-OpenClawIsWindows',
     'Get-OpenClawReadiness',
     'Show-OpenClawReadiness',
     'Get-OpenClawInstallPlan',
+    'Get-OpenClawPlanFingerprint',
     'Show-OpenClawInstallPlan',
     'Save-OpenClawInstaller',
     'Install-OpenClawGitPrerequisite',

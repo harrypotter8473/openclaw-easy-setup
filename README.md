@@ -2,7 +2,7 @@
 
 Windows 초보자가 OpenClaw를 안전하게 설치하고, 중단되더라도 이어서 진행할 수 있도록 돕는 한국어 우선 설치 도우미입니다.
 
-> 현재 상태: **복구 가능한 PowerShell CLI 0.2**입니다. 실제 변경에는 명시적인 승인과 확인이 필요합니다. 이 프로젝트는 OpenClaw 공식 프로젝트가 아닙니다.
+> 현재 상태: **한국어 Windows GUI 0.3**입니다. 실제 변경에는 계획 확인과 명시적인 동의가 필요합니다. 이 프로젝트는 OpenClaw 공식 프로젝트가 아닙니다.
 
 ## 지금 가능한 것
 
@@ -15,18 +15,24 @@ Windows 초보자가 OpenClaw를 안전하게 설치하고, 중단되더라도 �
 - 기존 OpenClaw 설치를 확인한 뒤 유지·업데이트·다운그레이드 차단 판단
 - 인터넷 연결 없이 만들 수 있는 문제 해결용 진단 번들
 - 공식 온보딩, `doctor`, 보안 감사, Gateway 상태 검증 연결
+- 명령어 없이 실행할 수 있는 한국어 단계형 Windows GUI
+- 설치 계획 지문 확인, 기본 거부 승인, 단계별 진행 표시와 안전한 취소
+- 중단된 설치 자동 감지, 한 번 누르는 재개, 오류 코드·로그·진단 ZIP 안내
+- Windows 시스템 색상, 키보드 탐색과 화면 읽기 도구용 접근성 정보
 - PowerShell 5.1 및 PowerShell 7 자동 테스트
 
 ## 가장 쉬운 시작
 
-저장소를 내려받은 뒤 PowerShell에서 다음 두 줄을 실행합니다.
+저장소를 내려받은 뒤 **`Start-OpenClawEasySetup.cmd`를 두 번 클릭**하세요. 이 실행 파일은 Windows에 포함된 PowerShell을 일반 사용자 권한으로 열고 GUI만 시작합니다.
+
+명령으로 열려면 PowerShell에서 다음을 실행합니다.
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-./OpenClawEasySetup.ps1
+./OpenClawEasySetup.Gui.ps1
 ```
 
-메뉴에서는 다음 작업을 선택할 수 있습니다.
+GUI에서는 다음 작업을 선택할 수 있습니다.
 
 ```text
 1. PC 확인
@@ -35,12 +41,21 @@ Set-ExecutionPolicy -Scope Process Bypass
 4. OpenClaw 설정
 5. 설치 상태 확인
 6. 문제 해결 파일 만들기
-0. 종료
 ```
 
-`2. 설치 시작`은 먼저 설치 계획을 보여줍니다. PC 변경 여부를 묻는 질문의 기본값은 `N`이므로, 동의할 때만 `y`를 입력하세요.
+`설치 시작`과 `이전 설치 이어하기`는 먼저 8단계 설치 계획을 보여줍니다. 동의 체크는 기본적으로 꺼져 있고 Enter 키의 기본 동작도 `아니요, 돌아가기`입니다. 설치 과정은 별도 PowerShell 프로세스에서 실행되므로 GUI 프로세스와 설치 환경이 섞이지 않습니다.
 
-## 명령으로 실행하기
+취소를 누르면 WinGet이나 설치 프로그램을 강제로 종료하지 않습니다. 현재 안전 단계가 끝난 뒤 멈추고 체크포인트를 남기므로, 다음 실행에서 `이전 설치 이어하기`로 계속할 수 있습니다.
+
+`Start-OpenClawEasySetup.cmd`의 실행 정책 우회는 해당 PowerShell 프로세스에만 적용되며 Windows의 영구 실행 정책을 변경하지 않습니다.
+
+## CLI로 실행하기
+
+GUI 없이 기존 메뉴를 사용하려면 다음을 실행합니다.
+
+```powershell
+./OpenClawEasySetup.ps1
+```
 
 진단과 계획 확인은 PC를 변경하지 않습니다.
 
@@ -109,6 +124,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 - 재개할 때도 저장된 결과를 맹신하지 않고 현재 설치 상태와 보안 조건을 다시 확인합니다.
 - 같은 목표 버전이 이미 있어도 유효한 무결성 영수증이 없으면 기존 패키지 코드를 실행하지 않습니다. npm 수명주기 스크립트를 끄고 해당 패키지만 제거한 뒤 고정 버전으로 다시 설치합니다.
 - 관리자 권한을 자동 요청하지 않습니다.
+- GUI 전체를 관리자 권한으로 실행하지 않습니다. 필요한 Git·Node.js 준비 단계에서만 WinGet 설치 프로그램이 Windows 권한 확인을 표시할 수 있습니다.
+- GUI가 보여준 설치 계획과 실행 직전 계획의 SHA-256 지문이 다르면 설치를 차단합니다.
+- GUI의 설치 취소는 개인 상태 폴더 안의 검증된 신호 파일을 사용하며 외부 프로세스를 강제로 종료하지 않습니다.
 - 외부 공개, 공개 DM, 광범위한 도구 권한을 기본값으로 활성화하지 않습니다.
 
 자세한 내용은 [보안 정책](SECURITY.md)과 [아키텍처](docs/architecture.md)를 참고하세요.
@@ -127,8 +145,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 ## 프로젝트 구조
 
 ```text
-OpenClawEasySetup.ps1       사용자 진입점
-src/                        진단·복구·다운로드·설치 엔진
+Start-OpenClawEasySetup.cmd 초보자용 GUI 실행 파일
+OpenClawEasySetup.Gui.ps1   한국어 WPF GUI
+OpenClawEasySetup.ps1       CLI 및 GUI 작업 프로세스 진입점
+ui/                         시스템 색상 기반 WPF 화면
+src/                        GUI 어댑터와 진단·복구·다운로드·설치 엔진
 config/                     검토된 공식 출처와 런타임 요구사항
 locales/                    한국어 메시지
 tests/                      외부 의존성 없는 테스트
@@ -138,4 +159,4 @@ docs/                       설계 결정과 로드맵
 
 ## 다음 단계
 
-다음 구현 목표는 PowerShell 명령을 몰라도 사용할 수 있는 **Windows 데스크톱 GUI**입니다. 이후 안전한 설정 마법사와 서명된 `.exe` 또는 MSIX 배포를 준비합니다. 자세한 범위는 [로드맵](docs/roadmap.md)에 정리합니다.
+다음 구현 목표는 모델 제공자와 메신저 연결을 안전하게 안내하는 **쉬운 설정 마법사 0.4**입니다. 이후 서명된 `.exe` 또는 MSIX 배포를 준비합니다. 자세한 범위는 [로드맵](docs/roadmap.md)에 정리합니다.

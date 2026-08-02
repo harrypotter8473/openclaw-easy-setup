@@ -1,7 +1,7 @@
 ﻿Set-StrictMode -Version Latest
 
 $script:RecoverySchemaVersion = 1
-$script:RecoveryToolVersion = '0.2.0'
+$script:RecoveryToolVersion = '0.3.0'
 $script:InstallStageIds = @('diagnose', 'node', 'download', 'integrity', 'dryRun', 'install', 'onboard', 'verify')
 $script:ExitCodeDefinitions = @{
     Success = [pscustomobject]@{ Kind = 'Success'; Id = 'OCES-SUCCESS'; ExitCode = 0; Message = '작업을 완료했습니다.'; Guidance = '' }
@@ -14,6 +14,7 @@ $script:ExitCodeDefinitions = @{
     Configure = [pscustomobject]@{ Kind = 'Configure'; Id = 'OCES-CONFIG-001'; ExitCode = 42; Message = 'OpenClaw 설정을 완료하지 못했습니다.'; Guidance = '공식 설정 화면을 다시 시작하세요.' }
     Verify = [pscustomobject]@{ Kind = 'Verify'; Id = 'OCES-VERIFY-001'; ExitCode = 50; Message = '설치 후 상태 확인을 통과하지 못했습니다.'; Guidance = '문제 해결 파일을 만든 뒤 오류 코드를 함께 확인하세요.' }
     Resume = [pscustomobject]@{ Kind = 'Resume'; Id = 'OCES-RESUME-001'; ExitCode = 60; Message = '이전 설치 기록을 안전하게 이어갈 수 없습니다.'; Guidance = '새 설치를 시작하거나 문제 해결 파일을 만드세요.' }
+    Cancelled = [pscustomobject]@{ Kind = 'Cancelled'; Id = 'OCES-CANCELLED-001'; ExitCode = 61; Message = '요청에 따라 안전한 단계에서 설치를 중단했습니다.'; Guidance = '준비되면 이전 설치 이어하기를 선택하세요.' }
     Bundle = [pscustomobject]@{ Kind = 'Bundle'; Id = 'OCES-BUNDLE-001'; ExitCode = 70; Message = '문제 해결 파일을 만들지 못했습니다.'; Guidance = '저장 위치와 디스크 여유 공간을 확인하세요.' }
     Unexpected = [pscustomobject]@{ Kind = 'Unexpected'; Id = 'OCES-UNEXPECTED-001'; ExitCode = 99; Message = '예상하지 못한 내부 오류가 발생했습니다.'; Guidance = '문제 해결 파일과 오류 코드를 개발자에게 알려주세요.' }
 }
@@ -22,7 +23,7 @@ function Get-OpenClawExitCodeDefinition {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Success', 'Warning', 'Diagnose', 'Download', 'Integrity', 'Prerequisite', 'Install', 'Configure', 'Verify', 'Resume', 'Bundle', 'Unexpected')]
+        [ValidateSet('Success', 'Warning', 'Diagnose', 'Download', 'Integrity', 'Prerequisite', 'Install', 'Configure', 'Verify', 'Resume', 'Cancelled', 'Bundle', 'Unexpected')]
         [string]$Kind
     )
 
@@ -373,6 +374,128 @@ function New-OpenClawTaggedException {
     $exception = New-Object InvalidOperationException($Message)
     $exception.Data['OpenClawFailureKind'] = $Kind
     return $exception
+}
+
+function Get-OpenClawCancellationPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [string]$StateDirectory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'The cancellation signal path was empty.')
+    }
+    $directories = Initialize-OpenClawStateDirectory -Path $StateDirectory
+    try {
+        $resolvedPath = [IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'The cancellation signal path was invalid.')
+    }
+    $expectedParent = [IO.Path]::GetFullPath($directories.State).TrimEnd('\', '/')
+    $actualParent = [IO.Path]::GetDirectoryName($resolvedPath).TrimEnd('\', '/')
+    $fileName = [IO.Path]::GetFileName($resolvedPath)
+    if (-not [string]::Equals($actualParent, $expectedParent, [StringComparison]::OrdinalIgnoreCase) -or $fileName -notmatch '^gui-[A-Fa-f0-9]{32}\.cancel$') {
+        throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'The cancellation signal must be a dedicated file in the private state directory.')
+    }
+    return $resolvedPath
+}
+
+function New-OpenClawCancellationPath {
+    [CmdletBinding()]
+    param(
+        [string]$StateDirectory
+    )
+
+    $directories = Initialize-OpenClawStateDirectory -Path $StateDirectory
+    do {
+        $path = Join-Path $directories.State ("gui-{0}.cancel" -f [guid]::NewGuid().ToString('N'))
+    } while (Test-Path -LiteralPath $path)
+    return $path
+}
+
+function Request-OpenClawCancellation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [string]$StateDirectory
+    )
+
+    $resolvedPath = Get-OpenClawCancellationPath -Path $Path -StateDirectory $StateDirectory
+    $marker = 'OpenClawEasySetup-Cancel-v1'
+    if (Test-Path -LiteralPath $resolvedPath) {
+        $item = Get-Item -LiteralPath $resolvedPath -Force
+        if (-not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and $item.Length -le 64 -and (Get-Content -LiteralPath $resolvedPath -Raw -Encoding UTF8).Trim() -eq $marker) {
+            return $resolvedPath
+        }
+        throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'The cancellation signal file was invalid.')
+    }
+    Write-OpenClawUtf8File -Path $resolvedPath -Content $marker
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [void](Set-OpenClawPrivatePathAcl -Path $resolvedPath)
+    }
+    return $resolvedPath
+}
+
+function Test-OpenClawCancellationRequested {
+    [CmdletBinding()]
+    param(
+        [string]$Path,
+        [string]$StateDirectory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    $resolvedPath = Get-OpenClawCancellationPath -Path $Path -StateDirectory $StateDirectory
+    if (-not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $resolvedPath -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -le 0 -or $item.Length -gt 64) {
+        throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'The cancellation signal file was invalid.')
+    }
+    if ((Get-Content -LiteralPath $resolvedPath -Raw -Encoding UTF8).Trim() -ne 'OpenClawEasySetup-Cancel-v1') {
+        throw (New-OpenClawTaggedException -Kind 'Resume' -Message 'The cancellation signal marker was invalid.')
+    }
+    return $true
+}
+
+function Remove-OpenClawCancellationSignal {
+    [CmdletBinding()]
+    param(
+        [string]$Path,
+        [string]$StateDirectory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    $resolvedPath = Get-OpenClawCancellationPath -Path $Path -StateDirectory $StateDirectory
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+        return $false
+    }
+    if (-not (Test-OpenClawCancellationRequested -Path $resolvedPath -StateDirectory $StateDirectory)) {
+        return $false
+    }
+    Remove-Item -LiteralPath $resolvedPath -Force
+    return $true
+}
+
+function Assert-OpenClawCancellationNotRequested {
+    param(
+        [string]$Path,
+        [string]$StateDirectory
+    )
+
+    if (Test-OpenClawCancellationRequested -Path $Path -StateDirectory $StateDirectory) {
+        throw (New-OpenClawTaggedException -Kind 'Cancelled' -Message 'The installation was stopped at a safe stage boundary.')
+    }
 }
 
 function Save-OpenClawCheckpointInternal {
