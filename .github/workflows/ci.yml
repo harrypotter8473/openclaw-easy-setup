@@ -18,23 +18,27 @@ jobs:
   powershell-tests:
     runs-on: windows-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: Run dependency-free tests
-        shell: ${{ matrix.shell }}
+      - name: Test with Windows PowerShell 5.1
+        shell: powershell
         run: ./tests/Run-Tests.ps1
 
-      - name: Smoke-test read-only diagnosis
-        shell: ${{ matrix.shell }}
-        run: ./OpenClawEasySetup.ps1 -Action Diagnose
+      - name: Test with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1
+
+      - name: Smoke-test plan with Windows PowerShell 5.1
+        shell: powershell
+        run: ./OpenClawEasySetup.ps1 -Action Plan
+
+      - name: Smoke-test plan with PowerShell 7
+        shell: pwsh
+        run: ./OpenClawEasySetup.ps1 -Action Plan
 
   secret-scan:
     runs-on: ubuntu-latest
