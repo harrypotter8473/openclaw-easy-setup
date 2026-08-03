@@ -50,6 +50,7 @@
 - Safe-settings plan and recovery receipt schema v2, with validated terminal v1 compatibility and fail-closed guidance for unfinished v1 work
 - Provenance receipt schema v2 with a retained full-content digest, fast metadata-tree verification, always-hashed critical files, and full-digest fallback
 - Windows PowerShell 5.1-compatible UTF-8 stdin for official OpenClaw JSON patch commands
+- Disposable Windows Sandbox GUI and token-free install-smoke modes with a read-only source mapping and sanitized result receipt
 
 ### Security
 

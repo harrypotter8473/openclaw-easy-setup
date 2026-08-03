@@ -40,6 +40,10 @@ jobs:
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -Sta -File ./tests/Run-GuiTests.ps1
 
+      - name: Test Windows Sandbox harness with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-SandboxTests.ps1
+
       - name: Test with PowerShell 7
         shell: pwsh
         run: ./tests/Run-Tests.ps1
@@ -51,6 +55,10 @@ jobs:
       - name: Test GUI with PowerShell 7
         shell: pwsh
         run: pwsh -NoLogo -NoProfile -Sta -File ./tests/Run-GuiTests.ps1
+
+      - name: Test Windows Sandbox harness with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-SandboxTests.ps1
 
       - name: Smoke-test plan with Windows PowerShell 5.1
         shell: powershell

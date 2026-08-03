@@ -49,6 +49,14 @@
 - [x] 비밀값이 제거된 설정 차이 미리보기와 기본 거부 적용 승인
 - [x] 적용 후 설정·SecretRef·보안·모델·채널·Gateway 상태 검사
 
+## 0.5 — 격리 설치 시험
+
+- [x] 기존 설치를 변경하지 않는 CLI `-WhatIf`와 GUI smoke 경로
+- [x] 읽기 전용 소스 매핑을 사용하는 Windows Sandbox GUI 시험 실행기
+- [x] 토큰 없이 본체·Slack 플러그인 신규 설치를 검증하는 `InstallSmoke`
+- [x] 원시 로그 대신 단계 상태와 오류 코드만 내보내는 실행별 결과 영수증
+- [ ] 깨끗한 Windows 체크포인트 기반 Hyper-V 반복 E2E
+
 ## 1.0 — 배포
 
 - [ ] 코드 서명된 `.exe` 또는 MSIX

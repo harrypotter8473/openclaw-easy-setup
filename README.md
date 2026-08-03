@@ -55,6 +55,19 @@ GUI에서는 다음 작업을 선택할 수 있습니다.
 
 `Start-OpenClawEasySetup.cmd`의 실행 정책 우회는 해당 PowerShell 프로세스에만 적용되며 Windows의 영구 실행 정책을 변경하지 않습니다.
 
+## 이미 OpenClaw가 설치된 PC에서 시험하기
+
+현재 설치를 건드리지 않고 화면과 계획만 확인하려면 `Diagnose`, `Plan`, `Install -Apply -WhatIf` 또는 두 GUI의 `-SmokeTest`를 사용할 수 있습니다. 실제 신규 설치를 시험하려면 Windows Sandbox 실행기를 사용하세요.
+
+```powershell
+./Start-OpenClawEasySetup.Sandbox.ps1 -Mode Gui
+./Start-OpenClawEasySetup.Sandbox.ps1 -Mode InstallSmoke
+```
+
+`Gui`는 새 Windows 화면에서 직접 눌러보는 모드이고, `InstallSmoke`는 온보딩과 토큰 입력 없이 본체·Slack 플러그인 설치를 자동 검사하는 모드입니다. 실행에 필요한 고정 파일만 별도 staging 폴더로 복사해 읽기 전용으로 연결하고 `.git`, 문서, 로컬 비밀 파일과 나머지 작업 폴더는 노출하지 않습니다. 실행별 결과 폴더에는 정제된 `result.json`만 기록합니다. Sandbox 창을 닫으면 내부 설치와 자격 증명은 모두 삭제됩니다. Windows Sandbox 기능은 자동으로 활성화하지 않습니다.
+
+기능 활성화 방법, 기존 설치의 공식 `--profile` 격리 시험, 결과 해석과 안전 경계는 [Windows Sandbox E2E 안내](docs/windows-sandbox-e2e.md)를 참고하세요.
+
 ## 쉬운 설정 마법사
 
 메인 화면에서 `OpenClaw 설정`을 선택하면 0.4 설정 마법사가 열립니다.
