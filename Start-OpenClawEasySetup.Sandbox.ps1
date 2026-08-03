@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('Gui', 'InstallSmoke')]
     [string]$Mode = 'Gui',
