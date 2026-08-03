@@ -10,3 +10,10 @@ id = "generic-api-key"
   regexTarget = "line"
   regexes = ['''OCES_RECEIPT_SECRET_CANARY_1234567890''']
   paths = ['''^tests/Run-SettingsTests\.ps1$''']
+
+  [[rules.allowlists]]
+  description = "Slack and Telegram/Discord credential labels in security documentation"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''Slack Bot User OAuth Token·App-Level Token, Telegram/Discord''']
+  paths = ['''^SECURITY\.md$''']
