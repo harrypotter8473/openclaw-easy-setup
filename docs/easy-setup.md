@@ -8,7 +8,7 @@ OpenClaw Easy Setup 0.4는 모델 제공자와 선택한 메신저를 안전한 
 
 1. 제공자와 모델을 선택합니다.
 2. 모델 API 키를 입력합니다.
-3. Telegram 또는 Discord가 필요하면 채널을 선택하고 봇 토큰을 입력합니다.
+3. Slack을 사용하면 가장 위의 Slack을 선택하고 Bot User OAuth Token과 `connections:write` App-Level Token을 입력합니다. 필요하면 Telegram 또는 Discord도 선택합니다.
 4. `변경 미리보기`를 눌러 공식 dry-run 결과, 변경 요약, 비밀값이 제거된 JSON patch와 계획 지문을 확인합니다.
 5. 내용이 맞을 때만 기본적으로 꺼져 있는 승인 체크를 선택하고 `설정 적용`을 누릅니다.
 
@@ -31,10 +31,20 @@ OpenClaw Easy Setup 0.4는 모델 제공자와 선택한 메신저를 안전한 
 | 세션 | `dmScope=per-channel-peer` |
 | 도구 | `messaging` 프로필 |
 | 명시적 차단 | runtime, filesystem, automation, UI, nodes, plugins, MCP bundle, elevated |
+| Slack | Socket Mode, DM `pairing`, 채널·그룹 DM `disabled`, mention 필수, native/slash 명령·bot 메시지·이름 매칭·`configWrites` 차단 |
 | Telegram | DM `pairing`, 그룹 `disabled`, `configWrites=false` |
 | Discord | DM `pairing`, 서버 그룹 `disabled`, `configWrites=false` |
 
-Telegram과 Discord는 선택 사항입니다. 선택하지 않은 채널은 patch에 포함하지 않으므로 기존 채널 설정을 자동으로 끄거나 덮어쓰지 않습니다. 선택한 채널과 모델 공급자, Gateway 인증, 기본 모델, Credential Manager resolver 공급자는 미리보기에 표시된 Easy Setup 소유 경로로서 정확히 교체됩니다. 따라서 기존의 사용자 지정 API 주소·header·채널 전송 설정은 선택한 새 키나 토큰을 받지 않습니다. 나머지 설정은 merge로 유지됩니다.
+Slack, Telegram과 Discord는 선택 사항입니다. 선택하지 않은 채널은 patch에 포함하지 않으므로 기존 채널 설정을 자동으로 끄거나 덮어쓰지 않습니다. 선택한 채널과 모델 공급자, Gateway 인증, 기본 모델, Credential Manager resolver 공급자는 미리보기에 표시된 Easy Setup 소유 경로로서 정확히 교체됩니다. 따라서 기존의 사용자 지정 API 주소·header·채널 전송 설정은 선택한 새 키나 토큰을 받지 않습니다. 나머지 설정은 merge로 유지됩니다.
+
+## Slack을 처음 준비할 때
+
+설치 단계가 공식 `@openclaw/slack@2026.7.1` 플러그인을 본체와 같은 버전으로 준비하고 npm integrity·shasum을 확인합니다. 설정 전에 [고정 커밋의 공식 Slack 문서](https://github.com/openclaw/openclaw/blob/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/docs/channels/slack.md)의 **Quick setup → Socket Mode**를 엽니다. Slack 앱 관리 화면에서 **Create New App → From a manifest**를 선택하고 문서의 권장 또는 최소 manifest를 붙여 넣어 앱을 만든 뒤 **Install to Workspace**까지 완료하세요. manifest가 필요한 bot OAuth scope와 message/app mention 이벤트 구독을 함께 설정합니다. 수동으로 scope나 이벤트를 줄이면 연결 검사는 통과해도 메시지가 도착하지 않을 수 있습니다.
+
+1. Bot User OAuth Token: 일반적으로 `xoxb-`로 시작합니다.
+2. App-Level Token: 일반적으로 `xapp-`로 시작하며 `connections:write` 권한이 필요합니다.
+
+접두사는 안내용이며 도우미가 토큰 값을 로그에 남기거나 문자열 규칙만으로 진위를 판단하지 않습니다. 적용 후 자동 검사는 두 SecretRef 상태, Gateway의 Slack runtime 실행·Socket 연결과 bot probe를 확인하지만 실제 메시지 왕복까지 증명하지는 않습니다. Slack에서 설치한 봇에게 개인 DM을 보내고 공식 pairing 절차로 승인한 뒤 답장이 오는지 직접 확인하세요. 최초 Easy Setup은 개인 DM 페어링만 열며 Slack 채널과 그룹 DM은 차단합니다. 공개 채널을 나중에 허용하려면 공식 고급 설정에서 이름 대신 `C...` 채널 ID를 사용하세요.
 
 ## 적용 전 검사
 
@@ -76,7 +86,7 @@ patch가 적용되면 다음을 확인합니다.
 - exec SecretRef 감사
 - 심층 보안 감사
 - 모델 상태
-- 선택한 Telegram/Discord probe
+- 고정 Slack 플러그인 출처·runtime 검사와 선택한 Slack/Telegram/Discord probe
 - Gateway RPC 상태
 
 사후 검사 하나라도 실패하면 성공으로 표시하지 않습니다. 다만 patch 적용 후의 실패는 자동 롤백되지 않습니다. 화면에는 실패한 검사, 종료 코드 또는 의미 검증 실패 이유와 정제된 세부 정보가 표시됩니다. 적용이 시작된 각 시도는 첫 Credential Manager 쓰기 전에 현재 사용자와 SYSTEM만 읽을 수 있는 `State\settings-<계획 지문>.json` 복구 기록을 `Preparing` 상태로 만듭니다. patch 직후에는 `AppliedPendingChecks`, 검사 완료 뒤에는 `Succeeded` 또는 `Partial`로 원자 갱신합니다. 기록에는 정확한 Credential Manager ID, 적용 전후 설정 해시와 정제 결과만 남기며 비밀값은 넣지 않습니다.
@@ -87,12 +97,15 @@ patch가 적용되면 다음을 확인합니다.
 
 해시 변경 복구를 승인해도 복구 기록의 OpenClaw 버전·`config schema` 해시·활성 설정 경로가 현재 공식 CLI와 먼저 일치해야 합니다. 이 호환성은 자동으로 새 버전에 맞춰 다시 설정되지 않으며, 다르면 모든 resolver·Credential Manager·patch·Gateway 변경 전에 `Partial`로 멈춥니다. 호환성이 확인된 후에도 승인 patch 직후의 새 설정 해시, loopback Gateway와 최소 권한 도구·채널 불변 조건이 모두 일치해야 성공할 수 있습니다. 고정 OpenClaw 버전은 민감 경로의 `config get` 결과를 가리므로 SecretRef ID를 다시 읽는 대신, 성공한 정확 교체 patch와 직후 바이트 해시를 값 노출 없는 바인딩 증거로 사용합니다. 검사 도중 설정 해시가 다시 달라져도 `Partial`로 남습니다. 복구 기록이 손상되었거나 둘 이상 미완료 상태라면 자동 복구와 새 적용을 모두 중단하고 수동 검토를 요구합니다. `공식 고급 설정`을 선택해도 기존 일부 적용 상태는 사후 검증 전까지 성공으로 바뀌지 않습니다.
 
+Slack이 추가된 현재 마법사는 계획과 복구 기록 스키마 2를 사용합니다. 이전 스키마 1의 검증된 완료 기록은 새 설정을 막지 않지만, 미완료 기록은 자동 변환하지 않고 모든 새 적용과 복구 변경을 차단합니다. 이때 `State\settings-<계획 지문>.json`을 삭제하거나 편집하지 마세요. 기록을 만든 이전 Easy Setup 버전으로 마무리하거나 수동으로 설정과 Credential Manager 상태를 검토해야 하며, 도움을 요청할 때도 토큰이나 영수증 본문은 공유하지 마세요.
+
 ## 문제가 있을 때
 
 - `기존 설정이 유효하지 않음`: 공식 OpenClaw 복구 또는 고급 설정으로 기존 설정을 먼저 고칩니다.
 - `schema/config가 미리보기 뒤 변경됨`: 다른 OpenClaw 작업을 마친 뒤 `변경 미리보기`부터 다시 실행합니다.
 - `dry-run 거부`: 현재 설치된 OpenClaw 버전과 이 저장소의 고정 버전이 맞는지 확인합니다.
 - `resolver/ACL 거부`: 상태 폴더를 공유·동기화·재분석 지점이 아닌 현재 사용자 전용 로컬 폴더로 바꿉니다.
+- `Slack 플러그인 검사 실패`: 설치 상태 확인을 다시 실행합니다. 다른 출처·버전의 `slack` 플러그인은 자동 덮어쓰기하지 않습니다.
 - `Gateway 또는 채널 probe 실패`: 토큰을 GitHub Issue에 올리지 말고, 정제된 진단 ZIP과 오류 코드만 공유합니다.
 
 더 자세한 보안 경계는 [보안 정책](../SECURITY.md), 내부 흐름은 [아키텍처](architecture.md)를 참고하세요.

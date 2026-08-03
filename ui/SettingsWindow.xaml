@@ -148,22 +148,47 @@
                         <TextBlock
                             Margin="0,6,0,10"
                             Style="{StaticResource BodyTextStyle}"
-                            Text="처음에는 개인 메시지 페어링만 허용하고, 그룹 사용과 채널의 설정 변경 기능은 끕니다."
+                            Text="Slack을 먼저 지원합니다. 처음에는 개인 메시지 페어링만 허용하고, 그룹 사용과 채널의 설정 변경 기능은 끕니다."
                             TextWrapping="Wrap" />
 
                         <CheckBox
-                            x:Name="TelegramCheckBox"
-                            Content="Telegram 사용"
+                            x:Name="SlackCheckBox"
+                            Content="Slack 사용 (권장)"
                             IsChecked="False"
                             IsThreeState="False"
                             TabIndex="20"
+                            AutomationProperties.Name="Slack 채널 사용" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Slack Bot User OAuth Token (xoxb-)" />
+                        <PasswordBox
+                            x:Name="SlackBotTokenPasswordBox"
+                            IsEnabled="False"
+                            MaxLength="2560"
+                            TabIndex="21"
+                            AutomationProperties.Name="Slack Bot User OAuth Token 입력"
+                            AutomationProperties.HelpText="Slack 앱의 xoxb- Bot User OAuth Token입니다. 화면이나 로그에 표시되지 않습니다." />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Slack App-Level Token (xapp-)" />
+                        <PasswordBox
+                            x:Name="SlackAppTokenPasswordBox"
+                            IsEnabled="False"
+                            MaxLength="2560"
+                            TabIndex="22"
+                            AutomationProperties.Name="Slack App-Level Token 입력"
+                            AutomationProperties.HelpText="Socket Mode와 connections:write 권한을 가진 xapp- App-Level Token입니다. 화면이나 로그에 표시되지 않습니다." />
+
+                        <CheckBox
+                            x:Name="TelegramCheckBox"
+                            Margin="0,16,0,0"
+                            Content="Telegram 사용"
+                            IsChecked="False"
+                            IsThreeState="False"
+                            TabIndex="23"
                             AutomationProperties.Name="Telegram 채널 사용" />
                         <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Telegram 봇 토큰" />
                         <PasswordBox
                             x:Name="TelegramTokenPasswordBox"
                             IsEnabled="False"
                             MaxLength="2560"
-                            TabIndex="21"
+                            TabIndex="24"
                             AutomationProperties.Name="Telegram 봇 토큰 입력"
                             AutomationProperties.HelpText="Telegram을 사용할 때만 필요하며 화면이나 로그에 표시되지 않습니다." />
 
@@ -173,14 +198,14 @@
                             Content="Discord 사용"
                             IsChecked="False"
                             IsThreeState="False"
-                            TabIndex="22"
+                            TabIndex="25"
                             AutomationProperties.Name="Discord 채널 사용" />
                         <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Discord 봇 토큰" />
                         <PasswordBox
                             x:Name="DiscordTokenPasswordBox"
                             IsEnabled="False"
                             MaxLength="2560"
-                            TabIndex="23"
+                            TabIndex="26"
                             AutomationProperties.Name="Discord 봇 토큰 입력"
                             AutomationProperties.HelpText="Discord를 사용할 때만 필요하며 화면이나 로그에 표시되지 않습니다." />
                     </StackPanel>

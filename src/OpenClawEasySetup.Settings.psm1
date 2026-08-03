@@ -6,6 +6,9 @@ $script:CredentialModulePath = Join-Path $PSScriptRoot 'OpenClawEasySetup.Creden
 $script:ResolverSourcePath = Join-Path $PSScriptRoot 'CredentialResolver\OpenClawEasySetup.SecretResolver.cs'
 $script:CredentialProviderAlias = 'oces_wincred'
 $script:SettingsInvocationCache = $null
+$script:SafeSetupPlanVersion = 2
+$script:SafeSetupReceiptSchemaVersion = 2
+$script:SafeSetupToolVersion = '0.4.0'
 
 foreach ($requiredPath in @($script:EngineModulePath, $script:CredentialModulePath, $script:ResolverSourcePath)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -47,6 +50,11 @@ function Get-OpenClawSafeSetupCatalog {
                     [pscustomobject]@{ Id = 'google/gemini-3-flash-preview'; Label = 'Gemini 3 Flash Preview' }
                 )
             }
+        )
+        Channels = @(
+            [pscustomobject]@{ Id = 'slack'; Label = 'Slack (권장)'; SecretCount = 2 }
+            [pscustomobject]@{ Id = 'telegram'; Label = 'Telegram'; SecretCount = 1 }
+            [pscustomobject]@{ Id = 'discord'; Label = 'Discord'; SecretCount = 1 }
         )
         SecurityDefaults = [pscustomobject]@{
             GatewayMode = 'local'
@@ -451,6 +459,7 @@ function New-OpenClawSecretReference {
 function Get-OpenClawSafeSetupReplacePaths {
     param(
         [string]$ProviderId,
+        [bool]$EnableSlack,
         [bool]$EnableTelegram,
         [bool]$EnableDiscord
     )
@@ -465,6 +474,7 @@ function Get-OpenClawSafeSetupReplacePaths {
     # Replace the selected provider object so an old baseUrl/header override
     # cannot receive the newly entered API key. Bundled provider defaults remain.
     $paths.Add(("models.providers.{0}" -f $ProviderId))
+    if ($EnableSlack) { $paths.Add('channels.slack') }
     if ($EnableTelegram) { $paths.Add('channels.telegram') }
     if ($EnableDiscord) { $paths.Add('channels.discord') }
     return $paths.ToArray()
@@ -508,6 +518,35 @@ function Assert-OpenClawSafeSetupSelection {
     }
 }
 
+function Assert-OpenClawSafeSetupSlackPluginBinding {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Plan
+    )
+
+    $bindingProperty = $Plan.PSObject.Properties['SlackPlugin']
+    if ($null -eq $bindingProperty -or $null -eq $bindingProperty.Value) {
+        throw 'The approved setup plan was missing its pinned Slack plugin binding.'
+    }
+    $source = Get-OpenClawSourceConfig
+    $comparisons = @(
+        @('Id', 'id'),
+        @('Package', 'package'),
+        @('Version', 'version'),
+        @('InstallSpec', 'installSpec'),
+        @('NpmIntegrity', 'npmIntegrity'),
+        @('NpmShasum', 'npmShasum')
+    )
+    foreach ($comparison in $comparisons) {
+        $planProperty = $bindingProperty.Value.PSObject.Properties[$comparison[0]]
+        $sourceProperty = $source.slackPlugin.PSObject.Properties[$comparison[1]]
+        if ($null -eq $planProperty -or $null -eq $sourceProperty -or
+            -not [string]::Equals([string]$planProperty.Value, [string]$sourceProperty.Value, [StringComparison]::Ordinal)) {
+            throw 'The approved setup plan Slack plugin binding did not match the reviewed source contract.'
+        }
+    }
+}
+
 function Get-OpenClawSafeSetupPlanFingerprint {
     [CmdletBinding()]
     param(
@@ -515,6 +554,38 @@ function Get-OpenClawSafeSetupPlanFingerprint {
         [object]$Plan
     )
 
+    if ($null -eq $Plan -or $null -eq $Plan.PSObject.Properties['PlanVersion'] -or [int]$Plan.PlanVersion -ne $script:SafeSetupPlanVersion) {
+        throw 'The setup plan fingerprint contract was unsupported.'
+    }
+
+    $fingerprintSource = [ordered]@{
+        planVersion = $script:SafeSetupPlanVersion
+        openClawVersion = [string]$Plan.OpenClawVersion
+        schemaHash = [string]$Plan.SchemaHash
+        baseConfigHash = [string]$Plan.BaseConfigHash
+        configPath = [string]$Plan.ConfigPath
+        resolverPath = [string]$Plan.ResolverPath
+        providerId = [string]$Plan.ProviderId
+        modelId = [string]$Plan.ModelId
+        enableSlack = [bool]$Plan.EnableSlack
+        enableTelegram = [bool]$Plan.EnableTelegram
+        enableDiscord = [bool]$Plan.EnableDiscord
+        slackPlugin = $Plan.SlackPlugin
+        credentialIds = $Plan.CredentialIds
+        replacePaths = @($Plan.ReplacePaths)
+        patch = $Plan.Patch
+    }
+    return Get-OpenClawTextSha256 -Text (ConvertTo-OpenClawSettingsJson -Value $fingerprintSource -Compress)
+}
+
+function Get-OpenClawSafeSetupLegacyPlanFingerprint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Plan
+    )
+
+    # Receipt schema v1 predates Slack. Keep its exact canonical field order so
+    # terminal receipts can be authenticated and ignored safely during upgrade.
     $fingerprintSource = [ordered]@{
         planVersion = 1
         openClawVersion = [string]$Plan.OpenClawVersion
@@ -541,6 +612,7 @@ function New-OpenClawSafeSetupPlan {
         [string]$ProviderId,
         [Parameter(Mandatory = $true)]
         [string]$ModelId,
+        [bool]$EnableSlack = $false,
         [bool]$EnableTelegram = $false,
         [bool]$EnableDiscord = $false,
         [string]$StateDirectory,
@@ -555,6 +627,7 @@ function New-OpenClawSafeSetupPlan {
     )
 
     Assert-OpenClawSafeSetupSelection -ProviderId $ProviderId -ModelId $ModelId
+    $source = Get-OpenClawSourceConfig
     if ([string]::IsNullOrWhiteSpace($RunId)) {
         $RunId = [guid]::NewGuid().ToString('N')
     }
@@ -564,7 +637,6 @@ function New-OpenClawSafeSetupPlan {
         if ($SchemaHash -notmatch '^[A-Fa-f0-9]{64}$' -or $BaseConfigHash -notmatch '^[A-Fa-f0-9]{64}$' -or [string]::IsNullOrWhiteSpace($ConfigPath)) {
             throw 'Injected setup state requires schema hash, config hash, and config path together.'
         }
-        $source = Get-OpenClawSourceConfig
         $liveState = [pscustomobject]@{
             OpenClawVersion = [string]$source.openClaw.version
             SchemaHash = $SchemaHash.ToUpperInvariant()
@@ -585,6 +657,10 @@ function New-OpenClawSafeSetupPlan {
         GatewayToken = "v1/gateway/auth/token/$RunId"
         ModelApiKey = "v1/models/$ProviderId/api-key/$RunId"
     }
+    if ($EnableSlack) {
+        $credentialIds['SlackBotToken'] = "v1/channels/slack/bot-token/$RunId"
+        $credentialIds['SlackAppToken'] = "v1/channels/slack/app-token/$RunId"
+    }
     if ($EnableTelegram) {
         $credentialIds['TelegramBotToken'] = "v1/channels/telegram/bot-token/$RunId"
     }
@@ -602,6 +678,30 @@ function New-OpenClawSafeSetupPlan {
         apiKey = New-OpenClawSecretReference -Id $credentialIds.ModelApiKey
     }
     $channels = [ordered]@{}
+    if ($EnableSlack) {
+        $channels['slack'] = [ordered]@{
+            enabled = $true
+            mode = 'socket'
+            botToken = New-OpenClawSecretReference -Id $credentialIds.SlackBotToken
+            appToken = New-OpenClawSecretReference -Id $credentialIds.SlackAppToken
+            dmPolicy = 'pairing'
+            dm = [ordered]@{
+                enabled = $true
+                groupEnabled = $false
+            }
+            groupPolicy = 'disabled'
+            requireMention = $true
+            configWrites = $false
+            commands = [ordered]@{
+                native = $false
+                nativeSkills = $false
+            }
+            slashCommand = [ordered]@{ enabled = $false }
+            dangerouslyAllowNameMatching = $false
+            allowBots = $false
+            userTokenReadOnly = $true
+        }
+    }
     if ($EnableTelegram) {
         $channels['telegram'] = [ordered]@{
             enabled = $true
@@ -677,7 +777,7 @@ function New-OpenClawSafeSetupPlan {
     }
 
     $plan = [pscustomobject]@{
-        PlanVersion = 1
+        PlanVersion = $script:SafeSetupPlanVersion
         OpenClawVersion = [string]$liveState.OpenClawVersion
         SchemaHash = [string]$liveState.SchemaHash
         BaseConfigHash = [string]$liveState.BaseConfigHash
@@ -685,10 +785,19 @@ function New-OpenClawSafeSetupPlan {
         ResolverPath = $ResolverPath
         ProviderId = $ProviderId
         ModelId = $ModelId
+        EnableSlack = $EnableSlack
         EnableTelegram = $EnableTelegram
         EnableDiscord = $EnableDiscord
+        SlackPlugin = [pscustomobject][ordered]@{
+            Id = [string]$source.slackPlugin.id
+            Package = [string]$source.slackPlugin.package
+            Version = [string]$source.slackPlugin.version
+            InstallSpec = [string]$source.slackPlugin.installSpec
+            NpmIntegrity = [string]$source.slackPlugin.npmIntegrity
+            NpmShasum = [string]$source.slackPlugin.npmShasum
+        }
         CredentialIds = [pscustomobject]$credentialIds
-        ReplacePaths = @(Get-OpenClawSafeSetupReplacePaths -ProviderId $ProviderId -EnableTelegram $EnableTelegram -EnableDiscord $EnableDiscord)
+        ReplacePaths = @(Get-OpenClawSafeSetupReplacePaths -ProviderId $ProviderId -EnableSlack $EnableSlack -EnableTelegram $EnableTelegram -EnableDiscord $EnableDiscord)
         Patch = [pscustomobject]$patch
         Fingerprint = ''
     }
@@ -706,6 +815,7 @@ function Get-OpenClawSafeSetupPreview {
     Assert-OpenClawSafeSetupPlan -Plan $Plan
     $patchJson = ConvertTo-OpenClawSettingsJson -Value $Plan.Patch
     $channelSummary = New-Object System.Collections.Generic.List[string]
+    if ($Plan.EnableSlack) { $channelSummary.Add('Slack: Socket Mode, DM pairing, 채널·그룹 DM 차단') }
     if ($Plan.EnableTelegram) { $channelSummary.Add('Telegram: DM pairing, 그룹 차단') }
     if ($Plan.EnableDiscord) { $channelSummary.Add('Discord: DM pairing, 서버 그룹 차단') }
     if ($channelSummary.Count -eq 0) { $channelSummary.Add('선택한 채널 없음 (기존 채널은 변경하지 않음)') }
@@ -717,6 +827,7 @@ function Get-OpenClawSafeSetupPreview {
         '- 도구 권한: messaging 프로필, 파일/명령 실행/자동화/elevated 차단'
         '- 개인 대화: 채널별 상대방 세션 분리'
         "- 채널: $($channelSummary -join '; ')"
+        $(if ($Plan.EnableSlack) { "- Slack 플러그인: 공식 $($Plan.SlackPlugin.InstallSpec), npm 무결성 고정·검증" } else { '- Slack 플러그인: 설치 단계에서 공식 고정 버전을 준비하며, 이 설정에서는 Slack을 활성화하지 않음' })
         '- 비밀값: Windows Credential Manager에 저장; 아래 패치에는 참조 ID만 포함'
         '- 적용 방식: 공식 config patch dry-run → Easy Setup 소유 비밀 경로 정확히 교체 → validate/audit'
         "- 정확히 교체하는 Easy Setup 경로: $(@($Plan.ReplacePaths) -join ', ')"
@@ -733,14 +844,20 @@ function Get-OpenClawSafeSetupPreview {
 function Assert-OpenClawSafeSetupPlan {
     param([object]$Plan)
 
-    if ($null -eq $Plan -or [int]$Plan.PlanVersion -ne 1) {
+    if ($null -eq $Plan -or [int]$Plan.PlanVersion -ne $script:SafeSetupPlanVersion) {
         throw 'The approved setup plan was missing or unsupported.'
+    }
+    foreach ($requiredProperty in @('EnableSlack', 'EnableTelegram', 'EnableDiscord', 'SlackPlugin')) {
+        if ($null -eq $Plan.PSObject.Properties[$requiredProperty]) {
+            throw 'The approved setup plan was missing a required channel contract field.'
+        }
     }
     if ([string]$Plan.SchemaHash -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$Plan.BaseConfigHash -notmatch '^[A-Fa-f0-9]{64}$' -or [string]$Plan.Fingerprint -notmatch '^[A-Fa-f0-9]{64}$') {
         throw 'The approved setup plan hashes were invalid.'
     }
     $expectedReplacePaths = @(Get-OpenClawSafeSetupReplacePaths `
         -ProviderId ([string]$Plan.ProviderId) `
+        -EnableSlack ([bool]$Plan.EnableSlack) `
         -EnableTelegram ([bool]$Plan.EnableTelegram) `
         -EnableDiscord ([bool]$Plan.EnableDiscord))
     $actualReplacePaths = @($Plan.ReplacePaths)
@@ -752,6 +869,7 @@ function Assert-OpenClawSafeSetupPlan {
             throw 'The approved setup plan replace-path contract was invalid.'
         }
     }
+    Assert-OpenClawSafeSetupSlackPluginBinding -Plan $Plan
     $calculated = Get-OpenClawSafeSetupPlanFingerprint -Plan $Plan
     if (-not [string]::Equals($calculated, [string]$Plan.Fingerprint, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The approved setup plan changed after preview.'
@@ -889,6 +1007,10 @@ function Test-OpenClawRecoveryCredentialMap {
     # Keep the generated Gateway token stable during recovery. Replacing it while
     # the running Gateway still has the old value loaded can lock the CLI out.
     $expectedNames = @('ModelApiKey')
+    if ($Plan.EnableSlack) {
+        $expectedNames += 'SlackBotToken'
+        $expectedNames += 'SlackAppToken'
+    }
     if ($Plan.EnableTelegram) { $expectedNames += 'TelegramBotToken' }
     if ($Plan.EnableDiscord) { $expectedNames += 'DiscordBotToken' }
     if ($CredentialMap.Count -ne $expectedNames.Count) {
@@ -1062,8 +1184,13 @@ function Invoke-OpenClawSafeSetupInvariantCheck {
         }
     }
 
-    foreach ($channelId in @('telegram', 'discord')) {
-        $enabledByPlan = if ($channelId -eq 'telegram') { [bool]$Plan.EnableTelegram } else { [bool]$Plan.EnableDiscord }
+    $enabledChannels = [ordered]@{
+        slack = [bool]$Plan.EnableSlack
+        telegram = [bool]$Plan.EnableTelegram
+        discord = [bool]$Plan.EnableDiscord
+    }
+    foreach ($channelId in $enabledChannels.Keys) {
+        $enabledByPlan = [bool]$enabledChannels[$channelId]
         if (-not $enabledByPlan) { continue }
         $channel = Get-OpenClawSafeSetupConfigValue -Path ("channels.$channelId") -StateDirectory $StateDirectory
         if (-not $channel.Succeeded) {
@@ -1077,6 +1204,19 @@ function Invoke-OpenClawSafeSetupInvariantCheck {
                 [string]$channel.Value.groupPolicy -ne 'disabled' -or
                 $channel.Value.configWrites -ne $false) {
                 $failures.Add(("The selected {0} channel did not retain pairing-only, groups-disabled, no-config-write defaults." -f $channelId))
+            }
+            if ($channelId -eq 'slack' -and
+                ([string]$channel.Value.mode -ne 'socket' -or
+                $channel.Value.dm.enabled -ne $true -or
+                $channel.Value.dm.groupEnabled -ne $false -or
+                $channel.Value.requireMention -ne $true -or
+                $channel.Value.commands.native -ne $false -or
+                $channel.Value.commands.nativeSkills -ne $false -or
+                $channel.Value.slashCommand.enabled -ne $false -or
+                $channel.Value.dangerouslyAllowNameMatching -ne $false -or
+                $channel.Value.allowBots -ne $false -or
+                $channel.Value.userTokenReadOnly -ne $true)) {
+                $failures.Add('The selected Slack channel did not retain the reviewed Socket Mode, DM-only, mention, command, bot, and identity defaults.')
             }
         }
         catch {
@@ -1198,7 +1338,7 @@ function Test-OpenClawModelStatusJson {
 function Test-OpenClawChannelStatusJson {
     param(
         [object]$Value,
-        [ValidateSet('telegram', 'discord')]
+        [ValidateSet('slack', 'telegram', 'discord')]
         [string]$ChannelId
     )
 
@@ -1240,17 +1380,26 @@ function Test-OpenClawChannelStatusJson {
             $connectedProperty = $_.PSObject.Properties['connected']
             $lastErrorProperty = $_.PSObject.Properties['lastError']
             $auditProperty = $_.PSObject.Properties['audit']
+            $healthStateProperty = $_.PSObject.Properties['healthState']
+            $botTokenStatusProperty = $_.PSObject.Properties['botTokenStatus']
+            $appTokenStatusProperty = $_.PSObject.Properties['appTokenStatus']
             $probeOk = $null -ne $probeProperty -and $null -ne $probeProperty.Value -and
                 $null -ne $probeProperty.Value.PSObject.Properties['ok'] -and $probeProperty.Value.ok -eq $true
             $auditOk = $null -eq $auditProperty -or $null -eq $auditProperty.Value -or
                 ($null -ne $auditProperty.Value.PSObject.Properties['ok'] -and $auditProperty.Value.ok -eq $true)
             $isRunning = $null -ne $runningProperty -and $runningProperty.Value -eq $true
-            $isConnected = $ChannelId -ne 'discord' -or
+            $isConnected = $ChannelId -notin @('slack', 'discord') -or
                 ($null -ne $connectedProperty -and $connectedProperty.Value -eq $true)
+            $slackCredentialsAvailable = $ChannelId -ne 'slack' -or
+                ($null -ne $botTokenStatusProperty -and [string]$botTokenStatusProperty.Value -eq 'available' -and
+                $null -ne $appTokenStatusProperty -and [string]$appTokenStatusProperty.Value -eq 'available')
+            $slackHealthIsHealthy = $ChannelId -ne 'slack' -or
+                ($null -ne $healthStateProperty -and [string]$healthStateProperty.Value -eq 'healthy')
             $noLastError = $null -eq $lastErrorProperty -or [string]::IsNullOrWhiteSpace([string]$lastErrorProperty.Value)
             $null -ne $enabledProperty -and $enabledProperty.Value -eq $true -and
                 $null -ne $configuredProperty -and $configuredProperty.Value -eq $true -and
-                $probeOk -and $auditOk -and $isRunning -and $isConnected -and $noLastError
+                $probeOk -and $auditOk -and $isRunning -and $isConnected -and
+                $slackCredentialsAvailable -and $slackHealthIsHealthy -and $noLastError
         })
         return $healthy.Count -gt 0
     }
@@ -1266,7 +1415,7 @@ function Get-OpenClawSafeSetupSemanticFailureDetail {
         [AllowNull()]
         [object]$Value,
         [string]$ExpectedModelId,
-        [ValidateSet('', 'telegram', 'discord')]
+        [ValidateSet('', 'slack', 'telegram', 'discord')]
         [string]$ChannelId = ''
     )
 
@@ -1358,10 +1507,19 @@ function Get-OpenClawSafeSetupSemanticFailureDetail {
                         $runningProperty = $account.PSObject.Properties['running']
                         $connectedProperty = $account.PSObject.Properties['connected']
                         $lastErrorProperty = $account.PSObject.Properties['lastError']
+                        $healthStateProperty = $account.PSObject.Properties['healthState']
+                        $botTokenStatusProperty = $account.PSObject.Properties['botTokenStatus']
+                        $appTokenStatusProperty = $account.PSObject.Properties['appTokenStatus']
                         $accountId = if ($null -ne $accountIdProperty) { [string]$accountIdProperty.Value } else { '<unknown>' }
                         $running = if ($null -ne $runningProperty) { [string]$runningProperty.Value } else { '<missing>' }
                         $connected = if ($null -ne $connectedProperty) { [string]$connectedProperty.Value } else { '<missing>' }
                         $parts.Add(("Account {0}: running={1}, connected={2}." -f $accountId, $running, $connected))
+                        if ($ChannelId -eq 'slack') {
+                            $healthState = if ($null -ne $healthStateProperty) { [string]$healthStateProperty.Value } else { '<missing>' }
+                            $botTokenStatus = if ($null -ne $botTokenStatusProperty) { [string]$botTokenStatusProperty.Value } else { '<missing>' }
+                            $appTokenStatus = if ($null -ne $appTokenStatusProperty) { [string]$appTokenStatusProperty.Value } else { '<missing>' }
+                            $parts.Add(("Slack runtime: health={0}, botCredentialState={1}, appCredentialState={2}." -f $healthState, $botTokenStatus, $appTokenStatus))
+                        }
                         if ($null -ne $lastErrorProperty -and -not [string]::IsNullOrWhiteSpace([string]$lastErrorProperty.Value)) {
                             $parts.Add(('Channel error: {0}' -f [string]$lastErrorProperty.Value))
                         }
@@ -1388,7 +1546,7 @@ function Invoke-OpenClawSafeSetupJsonCheck {
         [ValidateSet('Security', 'Model', 'Channel')]
         [string]$Kind,
         [string]$ExpectedModelId,
-        [ValidateSet('', 'telegram', 'discord')]
+        [ValidateSet('', 'slack', 'telegram', 'discord')]
         [string]$ChannelId = ''
     )
 
@@ -1425,6 +1583,67 @@ function Invoke-OpenClawSafeSetupJsonCheck {
         Passed = $passed
         ExitCode = [int]$result.ExitCode
         Detail = $detail
+    }
+}
+
+function Invoke-OpenClawSafeSetupSlackPluginCheck {
+    param(
+        [string]$StateDirectory
+    )
+
+    $safeError = ''
+    try {
+        $source = Get-OpenClawSourceConfig
+        $provenanceResult = Invoke-OpenClawSettingsCommand `
+            -Arguments @('plugins', 'inspect', 'slack', '--json') `
+            -StateDirectory $StateDirectory `
+            -AllowFailure
+        $safeError = [string]$provenanceResult.SafeError
+        if (-not $provenanceResult.Succeeded) {
+            throw 'The Slack plugin provenance inspection command failed.'
+        }
+        $provenanceInspection = $provenanceResult.Stdout | ConvertFrom-Json
+        [void](Assert-OpenClawSlackPluginProvenance -Inspection $provenanceInspection -SourceConfig $source)
+
+        $runtimeResult = Invoke-OpenClawSettingsCommand `
+            -Arguments @('plugins', 'inspect', 'slack', '--runtime', '--json') `
+            -StateDirectory $StateDirectory `
+            -AllowFailure
+        $safeError = [string]$runtimeResult.SafeError
+        if (-not $runtimeResult.Succeeded) {
+            throw 'The Slack plugin inspection command failed.'
+        }
+        $inspection = $runtimeResult.Stdout | ConvertFrom-Json
+        [void](Assert-OpenClawSlackPluginInspection -Inspection $inspection -SourceConfig $source)
+        return [pscustomobject]@{
+            Name = 'Slack plugin inspection'
+            Passed = $true
+            ExitCode = 0
+            Detail = ''
+        }
+    }
+    catch {
+        $detail = 'The exact reviewed Slack plugin was not installed, enabled, loaded, or provenance-verified.'
+        if (-not [string]::IsNullOrWhiteSpace($safeError)) {
+            $detail += ' ' + (Protect-OpenClawLogText -Text $safeError -MaximumLength 1024)
+        }
+        return [pscustomobject]@{
+            Name = 'Slack plugin inspection'
+            Passed = $false
+            ExitCode = -1
+            Detail = Protect-OpenClawLogText -Text $detail -MaximumLength 2048
+        }
+    }
+}
+
+function Assert-OpenClawSafeSetupSlackPluginReady {
+    param(
+        [string]$StateDirectory
+    )
+
+    $check = Invoke-OpenClawSafeSetupSlackPluginCheck -StateDirectory $StateDirectory
+    if ($check.Passed -ne $true) {
+        throw 'The exact reviewed Slack plugin must be installed and verified before Slack settings can be changed.'
     }
 }
 
@@ -1575,8 +1794,9 @@ function Write-OpenClawSafeSetupRecoveryReceipt {
     }
     $now = [DateTime]::UtcNow.ToString('o')
     $receipt = [ordered]@{
-        schemaVersion = 1
-        toolVersion = '0.4.0'
+        schemaVersion = $script:SafeSetupReceiptSchemaVersion
+        planVersion = $script:SafeSetupPlanVersion
+        toolVersion = $script:SafeSetupToolVersion
         userSid = $receiptUserSid
         createdAtUtc = if ($null -ne $existingReceipt) { [string]$existingReceipt.CreatedAtUtc } else { $now }
         updatedAtUtc = $now
@@ -1588,8 +1808,10 @@ function Write-OpenClawSafeSetupRecoveryReceipt {
         resolverPath = [string]$Plan.ResolverPath
         providerId = [string]$Plan.ProviderId
         modelId = [string]$Plan.ModelId
+        enableSlack = [bool]$Plan.EnableSlack
         enableTelegram = [bool]$Plan.EnableTelegram
         enableDiscord = [bool]$Plan.EnableDiscord
+        slackPlugin = $Plan.SlackPlugin
         baseConfigHash = ([string]$Plan.BaseConfigHash).ToUpperInvariant()
         appliedConfigHash = if ([string]::IsNullOrWhiteSpace($AppliedConfigHash)) { '' } else { $AppliedConfigHash.ToUpperInvariant() }
         credentialIds = @($CredentialIds)
@@ -1656,6 +1878,176 @@ function Write-OpenClawSafeSetupRecoveryReceipt {
     }
 }
 
+function ConvertFrom-OpenClawSafeSetupLegacyRecoveryReceiptData {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Data,
+        [Parameter(Mandatory = $true)]
+        [string]$FullPath,
+        [Parameter(Mandatory = $true)]
+        [Text.RegularExpressions.Match]$NameMatch
+    )
+
+    foreach ($requiredProperty in @(
+        'schemaVersion', 'toolVersion', 'userSid', 'createdAtUtc', 'updatedAtUtc', 'status',
+        'planFingerprint', 'openClawVersion', 'schemaHash', 'configPath', 'resolverPath',
+        'providerId', 'modelId', 'enableTelegram', 'enableDiscord', 'baseConfigHash',
+        'appliedConfigHash', 'credentialIds', 'credentialIdsByName', 'replacePaths', 'patch', 'checks'
+    )) {
+        if ($null -eq $Data.PSObject.Properties[$requiredProperty]) {
+            throw 'A legacy recovery receipt was missing a required field.'
+        }
+    }
+    if ($null -ne $Data.PSObject.Properties['planVersion'] -or
+        $null -ne $Data.PSObject.Properties['enableSlack'] -or
+        $null -ne $Data.PSObject.Properties['slackPlugin']) {
+        throw 'A legacy recovery receipt contained fields from a different schema.'
+    }
+    if ([string]$Data.schemaVersion -ne '1' -or [string]$Data.toolVersion -ne $script:SafeSetupToolVersion) {
+        throw 'A legacy recovery receipt schema or tool version was unsupported.'
+    }
+    if ($Data.enableTelegram -isnot [bool] -or $Data.enableDiscord -isnot [bool]) {
+        throw 'A legacy recovery receipt channel selection was invalid.'
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        if (-not [string]::Equals([string]$Data.userSid, $identity.User.Value, [StringComparison]::Ordinal)) {
+            throw 'A legacy recovery receipt belonged to a different Windows user.'
+        }
+    }
+    finally {
+        $identity.Dispose()
+    }
+
+    $fingerprint = ([string]$Data.planFingerprint).ToUpperInvariant()
+    if ($fingerprint -notmatch '^[A-F0-9]{64}$' -or
+        -not [string]::Equals($fingerprint, $NameMatch.Groups[1].Value, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$Data.schemaHash -notmatch '^[A-Fa-f0-9]{64}$' -or
+        [string]$Data.baseConfigHash -notmatch '^[A-Fa-f0-9]{64}$' -or
+        (-not [string]::IsNullOrWhiteSpace([string]$Data.appliedConfigHash) -and [string]$Data.appliedConfigHash -notmatch '^[A-Fa-f0-9]{64}$')) {
+        throw 'A legacy recovery receipt hash binding was invalid.'
+    }
+    $allowedStatuses = @('Preparing', 'AppliedPendingChecks', 'Succeeded', 'Partial', 'RolledBack')
+    if ([string]$Data.status -notin $allowedStatuses) {
+        throw 'A legacy recovery receipt status was invalid.'
+    }
+    try {
+        $createdAt = [DateTimeOffset]::Parse([string]$Data.createdAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        $updatedAt = [DateTimeOffset]::Parse([string]$Data.updatedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    }
+    catch {
+        throw 'A legacy recovery receipt timestamp was invalid.'
+    }
+    if ($updatedAt -lt $createdAt) {
+        throw 'A legacy recovery receipt timestamp order was invalid.'
+    }
+
+    $credentialIds = @($Data.credentialIds)
+    if ($credentialIds.Count -lt 2 -or $credentialIds.Count -gt 4 -or @($credentialIds | Select-Object -Unique).Count -ne $credentialIds.Count) {
+        throw 'A legacy recovery receipt credential set was invalid.'
+    }
+    foreach ($id in $credentialIds) {
+        if (-not (Test-OpenClawCredentialId -Id ([string]$id))) {
+            throw 'A legacy recovery receipt credential id was invalid.'
+        }
+    }
+    if ($null -eq $Data.credentialIdsByName) {
+        throw 'A legacy recovery receipt named credential set was invalid.'
+    }
+    $expectedCredentialNames = @('GatewayToken', 'ModelApiKey')
+    if ([bool]$Data.enableTelegram) { $expectedCredentialNames += 'TelegramBotToken' }
+    if ([bool]$Data.enableDiscord) { $expectedCredentialNames += 'DiscordBotToken' }
+    $credentialProperties = @($Data.credentialIdsByName.PSObject.Properties)
+    if ($credentialProperties.Count -ne $expectedCredentialNames.Count) {
+        throw 'A legacy recovery receipt named credential set was invalid.'
+    }
+    for ($credentialIndex = 0; $credentialIndex -lt $expectedCredentialNames.Count; $credentialIndex++) {
+        $name = $expectedCredentialNames[$credentialIndex]
+        $property = $Data.credentialIdsByName.PSObject.Properties[$name]
+        if ($null -eq $property -or
+            -not [string]::Equals([string]$property.Value, [string]$credentialIds[$credentialIndex], [StringComparison]::Ordinal)) {
+            throw 'A legacy recovery receipt named credential set did not match its ordered ids.'
+        }
+    }
+
+    try {
+        $configPath = [IO.Path]::GetFullPath([string]$Data.configPath)
+        $resolverPath = [IO.Path]::GetFullPath([string]$Data.resolverPath)
+    }
+    catch {
+        throw 'A legacy recovery receipt contained an invalid path.'
+    }
+    if (-not [string]::Equals($configPath, [string]$Data.configPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($resolverPath, [string]$Data.resolverPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'A legacy recovery receipt contained a noncanonical path.'
+    }
+    Assert-OpenClawSafeSetupSelection -ProviderId ([string]$Data.providerId) -ModelId ([string]$Data.modelId)
+
+    $expectedReplacePaths = @(Get-OpenClawSafeSetupReplacePaths `
+        -ProviderId ([string]$Data.providerId) `
+        -EnableSlack $false `
+        -EnableTelegram ([bool]$Data.enableTelegram) `
+        -EnableDiscord ([bool]$Data.enableDiscord))
+    $actualReplacePaths = @($Data.replacePaths)
+    if ($actualReplacePaths.Count -ne $expectedReplacePaths.Count) {
+        throw 'A legacy recovery receipt replace-path contract was invalid.'
+    }
+    for ($replacePathIndex = 0; $replacePathIndex -lt $expectedReplacePaths.Count; $replacePathIndex++) {
+        if (-not [string]::Equals([string]$actualReplacePaths[$replacePathIndex], [string]$expectedReplacePaths[$replacePathIndex], [StringComparison]::Ordinal)) {
+            throw 'A legacy recovery receipt replace-path contract was invalid.'
+        }
+    }
+
+    $legacyPlan = [pscustomobject]@{
+        OpenClawVersion = [string]$Data.openClawVersion
+        SchemaHash = ([string]$Data.schemaHash).ToUpperInvariant()
+        BaseConfigHash = ([string]$Data.baseConfigHash).ToUpperInvariant()
+        ConfigPath = $configPath
+        ResolverPath = $resolverPath
+        ProviderId = [string]$Data.providerId
+        ModelId = [string]$Data.modelId
+        EnableTelegram = [bool]$Data.enableTelegram
+        EnableDiscord = [bool]$Data.enableDiscord
+        CredentialIds = [pscustomobject]$Data.credentialIdsByName
+        ReplacePaths = $actualReplacePaths
+        Patch = [pscustomobject]$Data.patch
+    }
+    $calculatedFingerprint = Get-OpenClawSafeSetupLegacyPlanFingerprint -Plan $legacyPlan
+    if (-not [string]::Equals($calculatedFingerprint, $fingerprint, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'A legacy recovery receipt plan fingerprint was invalid.'
+    }
+    foreach ($check in @($Data.checks)) {
+        if ($null -eq $check) {
+            throw 'A legacy recovery receipt check record was invalid.'
+        }
+        foreach ($checkProperty in @('name', 'passed', 'exitCode', 'detail')) {
+            if ($null -eq $check.PSObject.Properties[$checkProperty]) {
+                throw 'A legacy recovery receipt check record was invalid.'
+            }
+        }
+        if ([string]$check.name -ne (Protect-OpenClawLogText -Text ([string]$check.name) -MaximumLength 256) -or
+            [string]$check.detail -ne (Protect-OpenClawLogText -Text ([string]$check.detail) -MaximumLength 2048)) {
+            throw 'A legacy recovery receipt contained an unsanitized check record.'
+        }
+    }
+
+    return [pscustomobject]@{
+        Path = $FullPath
+        SchemaVersion = 1
+        IsLegacy = $true
+        Status = [string]$Data.status
+        PlanFingerprint = $fingerprint
+        CreatedAtUtc = $createdAt.ToString('o')
+        UpdatedAtUtc = $updatedAt.ToString('o')
+        UpdatedAtUtcValue = $updatedAt.UtcDateTime
+        CredentialIds = $credentialIds
+        AppliedConfigHash = [string]$Data.appliedConfigHash
+        Checks = @($Data.checks)
+        Plan = $null
+    }
+}
+
 function Read-OpenClawSafeSetupRecoveryReceiptFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -1690,17 +2082,26 @@ function Read-OpenClawSafeSetupRecoveryReceiptFile {
     catch {
         throw 'A recovery receipt was not valid JSON.'
     }
+    $schemaProperty = $data.PSObject.Properties['schemaVersion']
+    if ($null -eq $schemaProperty) {
+        throw 'A recovery receipt was missing a required field.'
+    }
+    if ([string]$schemaProperty.Value -eq '1') {
+        return ConvertFrom-OpenClawSafeSetupLegacyRecoveryReceiptData -Data $data -FullPath $fullPath -NameMatch $nameMatch
+    }
     foreach ($requiredProperty in @(
-        'schemaVersion', 'toolVersion', 'userSid', 'createdAtUtc', 'updatedAtUtc', 'status',
+        'schemaVersion', 'planVersion', 'toolVersion', 'userSid', 'createdAtUtc', 'updatedAtUtc', 'status',
         'planFingerprint', 'openClawVersion', 'schemaHash', 'configPath', 'resolverPath',
-        'providerId', 'modelId', 'enableTelegram', 'enableDiscord', 'baseConfigHash',
+        'providerId', 'modelId', 'enableSlack', 'enableTelegram', 'enableDiscord', 'slackPlugin', 'baseConfigHash',
         'appliedConfigHash', 'credentialIds', 'credentialIdsByName', 'replacePaths', 'patch', 'checks'
     )) {
         if ($null -eq $data.PSObject.Properties[$requiredProperty]) {
             throw 'A recovery receipt was missing a required field.'
         }
     }
-    if ([int]$data.schemaVersion -ne 1 -or [string]$data.toolVersion -ne '0.4.0') {
+    if ([string]$data.schemaVersion -ne [string]$script:SafeSetupReceiptSchemaVersion -or
+        [string]$data.planVersion -ne [string]$script:SafeSetupPlanVersion -or
+        [string]$data.toolVersion -ne $script:SafeSetupToolVersion) {
         throw 'A recovery receipt schema or tool version was unsupported.'
     }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -1735,7 +2136,7 @@ function Read-OpenClawSafeSetupRecoveryReceiptFile {
         throw 'A recovery receipt timestamp order was invalid.'
     }
     $credentialIds = @($data.credentialIds)
-    if ($credentialIds.Count -lt 2 -or $credentialIds.Count -gt 4 -or @($credentialIds | Select-Object -Unique).Count -ne $credentialIds.Count) {
+    if ($credentialIds.Count -lt 2 -or $credentialIds.Count -gt 6 -or @($credentialIds | Select-Object -Unique).Count -ne $credentialIds.Count) {
         throw 'A recovery receipt credential set was invalid.'
     }
     foreach ($id in $credentialIds) {
@@ -1744,6 +2145,10 @@ function Read-OpenClawSafeSetupRecoveryReceiptFile {
         }
     }
     $expectedCredentialNames = @('GatewayToken', 'ModelApiKey')
+    if ([bool]$data.enableSlack) {
+        $expectedCredentialNames += 'SlackBotToken'
+        $expectedCredentialNames += 'SlackAppToken'
+    }
     if ([bool]$data.enableTelegram) { $expectedCredentialNames += 'TelegramBotToken' }
     if ([bool]$data.enableDiscord) { $expectedCredentialNames += 'DiscordBotToken' }
     $credentialProperties = @($data.credentialIdsByName.PSObject.Properties)
@@ -1766,7 +2171,7 @@ function Read-OpenClawSafeSetupRecoveryReceiptFile {
     }
     Assert-OpenClawSafeSetupSelection -ProviderId ([string]$data.providerId) -ModelId ([string]$data.modelId)
     $receiptPlan = [pscustomobject]@{
-        PlanVersion = 1
+        PlanVersion = $script:SafeSetupPlanVersion
         OpenClawVersion = [string]$data.openClawVersion
         SchemaHash = ([string]$data.schemaHash).ToUpperInvariant()
         BaseConfigHash = ([string]$data.baseConfigHash).ToUpperInvariant()
@@ -1774,8 +2179,10 @@ function Read-OpenClawSafeSetupRecoveryReceiptFile {
         ResolverPath = $resolverPath
         ProviderId = [string]$data.providerId
         ModelId = [string]$data.modelId
+        EnableSlack = [bool]$data.enableSlack
         EnableTelegram = [bool]$data.enableTelegram
         EnableDiscord = [bool]$data.enableDiscord
+        SlackPlugin = [pscustomobject]$data.slackPlugin
         CredentialIds = [pscustomobject]$data.credentialIdsByName
         ReplacePaths = @($data.replacePaths)
         Patch = [pscustomobject]$data.patch
@@ -1796,6 +2203,8 @@ function Read-OpenClawSafeSetupRecoveryReceiptFile {
 
     return [pscustomobject]@{
         Path = $fullPath
+        SchemaVersion = $script:SafeSetupReceiptSchemaVersion
+        IsLegacy = $false
         Status = [string]$data.status
         PlanFingerprint = $fingerprint
         CreatedAtUtc = $createdAt.ToString('o')
@@ -1831,6 +2240,12 @@ function Get-OpenClawSafeSetupPendingRecovery {
     $pending = New-Object System.Collections.Generic.List[object]
     foreach ($file in $files) {
         $receipt = Read-OpenClawSafeSetupRecoveryReceiptFile -Path $file.FullName -StatePath $statePath
+        if ($receipt.IsLegacy) {
+            if ($receipt.Status -in @('Preparing', 'AppliedPendingChecks', 'Partial')) {
+                throw 'An unfinished recovery receipt from schema v1 was found. No changes were made. Finish or manually verify that earlier setup with the OpenClaw Easy Setup version that created it before starting a new setup.'
+            }
+            continue
+        }
         if ($receipt.Status -in @('Preparing', 'AppliedPendingChecks', 'Partial')) {
             $pending.Add($receipt)
         }
@@ -1874,10 +2289,18 @@ function Enter-OpenClawSafeSetupTransactionLock {
 function Test-OpenClawSafeSetupGatewayPreflightChecks {
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Checks
+        [object[]]$Checks,
+        [switch]$RequireSlack
     )
 
-    foreach ($requiredName in @('Approved patch continuity', 'Config validation', 'Safe configuration invariants')) {
+    if (@($Checks | Where-Object { $_.Passed -ne $true }).Count -gt 0) {
+        return $false
+    }
+    $requiredNames = @('Approved patch continuity', 'Config validation', 'Safe configuration invariants')
+    if ($RequireSlack) {
+        $requiredNames = @('Slack plugin inspection') + $requiredNames
+    }
+    foreach ($requiredName in $requiredNames) {
         $matchingChecks = @($Checks | Where-Object {
             $nameProperty = $_.PSObject.Properties['Name']
             $null -ne $nameProperty -and
@@ -1906,10 +2329,14 @@ function Invoke-OpenClawSafeSetupPostChecks {
     )
 
     $checks = New-Object System.Collections.Generic.List[object]
+    $gatewayPreflightChecks = @()
+    if ($Plan.EnableSlack) {
+        $gatewayPreflightChecks += Invoke-OpenClawSafeSetupSlackPluginCheck -StateDirectory $StateDirectory
+    }
     # Successful official patch + byte identity is the value-free proof for
     # SecretRefs. `config get` redacts descendants of paths such as apiKey and
     # therefore cannot prove their provider/id fields on the pinned release.
-    $gatewayPreflightChecks = @(
+    $gatewayPreflightChecks += @(
         Invoke-OpenClawSafeSetupConfigurationContinuityCheck -Plan $Plan -ExpectedConfigHash $ExpectedConfigHash
         Invoke-OpenClawSafeSetupCheck -Name 'Config validation' -Arguments @('config', 'validate', '--json') -StateDirectory $StateDirectory
         Invoke-OpenClawSafeSetupInvariantCheck -Plan $Plan -StateDirectory $StateDirectory
@@ -1918,7 +2345,7 @@ function Invoke-OpenClawSafeSetupPostChecks {
         $checks.Add($preflightCheck)
     }
     if ($EnsureGatewayService) {
-        if (Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $gatewayPreflightChecks) {
+        if (Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $gatewayPreflightChecks -RequireSlack:([bool]$Plan.EnableSlack)) {
             $checks.Add((Invoke-OpenClawSafeSetupCheck -Name 'Gateway service install' -Arguments @('gateway', 'install', '--json') -StateDirectory $StateDirectory))
             $checks.Add((Invoke-OpenClawSafeSetupCheck -Name 'Gateway restart' -Arguments @('gateway', 'restart', '--json') -StateDirectory $StateDirectory))
         }
@@ -1936,6 +2363,9 @@ function Invoke-OpenClawSafeSetupPostChecks {
     $checks.Add((Invoke-OpenClawSafeSetupCheck -Name 'Secrets audit' -Arguments @('secrets', 'audit', '--check', '--allow-exec') -StateDirectory $StateDirectory))
     $checks.Add((Invoke-OpenClawSafeSetupJsonCheck -Name 'Security audit' -Arguments @('security', 'audit', '--deep', '--json') -StateDirectory $StateDirectory -Kind Security))
     $checks.Add((Invoke-OpenClawSafeSetupJsonCheck -Name 'Model status' -Arguments @('models', 'status', '--check', '--json') -StateDirectory $StateDirectory -Kind Model -ExpectedModelId ([string]$Plan.ModelId)))
+    if ($Plan.EnableSlack) {
+        $checks.Add((Invoke-OpenClawSafeSetupJsonCheck -Name 'Slack probe' -Arguments @('channels', 'status', '--channel', 'slack', '--probe', '--json') -StateDirectory $StateDirectory -Kind Channel -ChannelId slack))
+    }
     if ($Plan.EnableTelegram) {
         $checks.Add((Invoke-OpenClawSafeSetupJsonCheck -Name 'Telegram probe' -Arguments @('channels', 'status', '--channel', 'telegram', '--probe', '--json') -StateDirectory $StateDirectory -Kind Channel -ChannelId telegram))
     }
@@ -2100,6 +2530,18 @@ function Invoke-OpenClawSafeSetupRecoveryVerification {
             -Checks @($compatibilityCheck) `
             -PreserveCredentialReplacementPending:$replacementWasPending)) {
             $recoveryChecks.Add($initialRecoveryCheck)
+        }
+        if ($plan.EnableSlack) {
+            $slackPluginCheck = Invoke-OpenClawSafeSetupSlackPluginCheck -StateDirectory $StateDirectory
+            $recoveryChecks.Add($slackPluginCheck)
+            if ($slackPluginCheck.Passed -ne $true) {
+                return [pscustomobject]@{
+                    Resolved = $false
+                    Status = [string]$receipt.Status
+                    Checks = $recoveryChecks.ToArray()
+                    RecoveryReceiptPath = [string]$receipt.Path
+                }
+            }
         }
         $activeConfigPathMatches = $false
         try {
@@ -2292,7 +2734,7 @@ function Invoke-OpenClawSafeSetupRecoveryVerification {
             foreach ($checkpointCheck in $replacementCheckpointChecks) { $recoveryChecks.Add($checkpointCheck) }
 
             $replacementSucceeded = $true
-            foreach ($name in @('ModelApiKey', 'TelegramBotToken', 'DiscordBotToken')) {
+            foreach ($name in @('ModelApiKey', 'SlackBotToken', 'SlackAppToken', 'TelegramBotToken', 'DiscordBotToken')) {
                 if (-not $CredentialMap.ContainsKey($name)) { continue }
                 try {
                     $credentialId = [string]$plan.CredentialIds.PSObject.Properties[$name].Value
@@ -2433,6 +2875,9 @@ function Invoke-OpenClawSafeSetupApply {
         # the config. Rebind freshness under our transaction lock before the
         # resolver, receipt, or any Credential Manager entry is created.
         Assert-OpenClawSafeSetupPlanFresh -Plan $Plan -StateDirectory $StateDirectory
+        if ($Plan.EnableSlack) {
+            Assert-OpenClawSafeSetupSlackPluginReady -StateDirectory $StateDirectory
+        }
 
         $resolver = Install-OpenClawCredentialResolver -StateDirectory $StateDirectory
         if (-not [string]::Equals([IO.Path]::GetFullPath([string]$resolver.Path), [IO.Path]::GetFullPath([string]$Plan.ResolverPath), [StringComparison]::OrdinalIgnoreCase)) {

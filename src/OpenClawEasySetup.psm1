@@ -61,6 +61,16 @@ function Get-OpenClawSourceConfig {
         throw 'The pinned OpenClaw release tag does not match the pinned package version.'
     }
 
+    if ([string]$config.slackPlugin.id -ne 'slack' -or
+        [string]$config.slackPlugin.package -ne '@openclaw/slack' -or
+        [string]$config.slackPlugin.version -notmatch '^\d{4}\.\d+\.\d+$' -or
+        [string]$config.slackPlugin.version -ne [string]$config.openClaw.version -or
+        [string]$config.slackPlugin.installSpec -ne ("{0}@{1}" -f $config.slackPlugin.package, $config.slackPlugin.version) -or
+        [string]$config.slackPlugin.npmIntegrity -notmatch '^sha512-[A-Za-z0-9+/]+={0,2}$' -or
+        [string]$config.slackPlugin.npmShasum -notmatch '^[A-Fa-f0-9]{40}$') {
+        throw 'The source configuration does not contain a valid exact official Slack plugin pin.'
+    }
+
     $expectedInstallerUri = "https://raw.githubusercontent.com/openclaw/openclaw/{0}/scripts/install.ps1" -f $config.openClaw.commitSha
     if ([string]$config.installer.uri -ne $expectedInstallerUri) {
         throw 'The installer URI is not pinned to the configured OpenClaw commit and script path.'
@@ -1044,7 +1054,7 @@ function Get-OpenClawInstallPlan {
         [pscustomobject]@{ Order = 3; Id = 'download'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.downloadTitle; Detail = ([string]$messages.planSteps.downloadDetail -f $config.openClaw.releaseTag, $config.openClaw.commitSha, (@($config.allowedDownloadHosts) -join ', ')) }
         [pscustomobject]@{ Order = 4; Id = 'integrity'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.integrityTitle; Detail = ([string]$messages.planSteps.integrityDetail -f $config.installer.sha256) }
         [pscustomobject]@{ Order = 5; Id = 'dryRun'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.dryRunTitle; Detail = ([string]$messages.planSteps.dryRunDetail -f $config.installer.installMethod, $config.openClaw.version) }
-        [pscustomobject]@{ Order = 6; Id = 'install'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.installTitle; Detail = $messages.planSteps.installDetail }
+        [pscustomobject]@{ Order = 6; Id = 'install'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.installTitle; Detail = ([string]$messages.planSteps.installDetail -f $config.slackPlugin.installSpec) }
         [pscustomobject]@{ Order = 7; Id = 'onboard'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.onboardTitle; Detail = $messages.planSteps.onboardDetail }
         [pscustomobject]@{ Order = 8; Id = 'verify'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.verifyTitle; Detail = $messages.planSteps.verifyDetail }
     )
@@ -1339,6 +1349,458 @@ function Resolve-OpenClawInvocation {
         Executable = $nodeSnapshot.Path
         PrefixArguments = @($packageSnapshot.EntryPath)
     }
+}
+
+function Get-OpenClawObjectPropertyValue {
+    param(
+        [AllowNull()]
+        [object]$InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+    if ($InputObject -is [Collections.IDictionary]) {
+        if ($InputObject.Contains($Name)) {
+            return $InputObject[$Name]
+        }
+        return $null
+    }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.Value
+}
+
+function Test-OpenClawPathContainedBy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CandidatePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RootPath
+    )
+
+    try {
+        $candidate = [IO.Path]::GetFullPath($CandidatePath)
+        $root = [IO.Path]::GetFullPath($RootPath)
+        $rootPrefix = $root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        return [string]::Equals($candidate, $root, [StringComparison]::OrdinalIgnoreCase) -or
+            $candidate.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-OpenClawSlackPluginProvenance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Inspection,
+
+        [object]$SourceConfig = $(Get-OpenClawSourceConfig)
+    )
+
+    $expected = Get-OpenClawObjectPropertyValue -InputObject $SourceConfig -Name 'slackPlugin'
+    $expectedId = [string](Get-OpenClawObjectPropertyValue -InputObject $expected -Name 'id')
+    $expectedPackage = [string](Get-OpenClawObjectPropertyValue -InputObject $expected -Name 'package')
+    $expectedVersion = [string](Get-OpenClawObjectPropertyValue -InputObject $expected -Name 'version')
+    $expectedSpec = [string](Get-OpenClawObjectPropertyValue -InputObject $expected -Name 'installSpec')
+    $expectedIntegrity = [string](Get-OpenClawObjectPropertyValue -InputObject $expected -Name 'npmIntegrity')
+    $expectedShasum = [string](Get-OpenClawObjectPropertyValue -InputObject $expected -Name 'npmShasum')
+    if ($expectedId -ne 'slack' -or $expectedPackage -ne '@openclaw/slack' -or
+        $expectedVersion -notmatch '^\d{4}\.\d+\.\d+$' -or
+        $expectedSpec -ne ("{0}@{1}" -f $expectedPackage, $expectedVersion) -or
+        $expectedIntegrity -notmatch '^sha512-[A-Za-z0-9+/]+={0,2}$' -or
+        $expectedShasum -notmatch '^[A-Fa-f0-9]{40}$') {
+        throw 'The expected Slack plugin source metadata was invalid.'
+    }
+
+    $plugin = Get-OpenClawObjectPropertyValue -InputObject $Inspection -Name 'plugin'
+    if ($null -eq $plugin) {
+        throw 'OpenClaw did not return a Slack plugin inspection record.'
+    }
+    if ([string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'id') -ne $expectedId -or
+        [string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'version') -ne $expectedVersion) {
+        throw 'The installed Slack plugin identity or version did not match the reviewed pin.'
+    }
+    $reportedPackageName = [string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'packageName')
+    if (-not [string]::IsNullOrWhiteSpace($reportedPackageName) -and $reportedPackageName -ne $expectedPackage) {
+        throw 'The installed Slack plugin reported a different npm package identity.'
+    }
+    if ([string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'origin') -ne 'global') {
+        throw 'The active Slack plugin did not come from the managed global plugin installation.'
+    }
+    if ((Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'enabled') -ne $true) {
+        throw 'The exact Slack plugin was not enabled.'
+    }
+    $pluginStatus = [string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'status')
+    if ([string]::IsNullOrWhiteSpace($pluginStatus) -or $pluginStatus -in @('disabled', 'error') -or
+        -not [string]::IsNullOrWhiteSpace([string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'error')) -or
+        -not [string]::IsNullOrWhiteSpace([string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'failurePhase'))) {
+        throw 'The Slack plugin snapshot reported a disabled, invalid, or failed source.'
+    }
+
+    $channelIdsValue = Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'channelIds'
+    $channelIds = @()
+    if ($null -ne $channelIdsValue) {
+        $channelIds = @($channelIdsValue)
+    }
+    if ($channelIds.Count -ne 1 -or [string]$channelIds[0] -ne $expectedId) {
+        throw 'The Slack plugin did not expose only the reviewed Slack channel capability.'
+    }
+    $diagnosticsValue = Get-OpenClawObjectPropertyValue -InputObject $Inspection -Name 'diagnostics'
+    $diagnostics = @()
+    if ($null -ne $diagnosticsValue) {
+        $diagnostics = @($diagnosticsValue)
+    }
+    if (@($diagnostics | Where-Object {
+        [string](Get-OpenClawObjectPropertyValue -InputObject $_ -Name 'level') -eq 'error'
+    }).Count -gt 0) {
+        throw 'The Slack plugin runtime inspection reported an error diagnostic.'
+    }
+    $compatibilityValue = Get-OpenClawObjectPropertyValue -InputObject $Inspection -Name 'compatibility'
+    $compatibility = @()
+    if ($null -ne $compatibilityValue) {
+        $compatibility = @($compatibilityValue)
+    }
+    if (@($compatibility | Where-Object {
+        [string](Get-OpenClawObjectPropertyValue -InputObject $_ -Name 'severity') -eq 'warn'
+    }).Count -gt 0) {
+        throw 'The Slack plugin reported a compatibility warning for this OpenClaw host.'
+    }
+
+    $install = Get-OpenClawObjectPropertyValue -InputObject $Inspection -Name 'install'
+    # The reviewed `plugins install <npm-spec> --pin` record uses the base
+    # `integrity`/`shasum` fields. `npmIntegrity`/`npmShasum` describe an
+    # npm-pack archive artifact and are not interchangeable provenance.
+    if ($null -eq $install -or [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'source') -ne 'npm' -or
+        [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'spec') -ne $expectedSpec -or
+        [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'version') -ne $expectedVersion -or
+        -not [string]::Equals([string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'integrity'), $expectedIntegrity, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'shasum'), $expectedShasum, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The Slack plugin npm install record did not match the reviewed package provenance.'
+    }
+    $resolvedName = [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'resolvedName')
+    if (-not [string]::IsNullOrWhiteSpace($resolvedName) -and $resolvedName -ne $expectedPackage) {
+        throw 'The Slack plugin resolved npm package name did not match the reviewed package.'
+    }
+    $resolvedVersion = [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'resolvedVersion')
+    if (-not [string]::IsNullOrWhiteSpace($resolvedVersion) -and $resolvedVersion -ne $expectedVersion) {
+        throw 'The Slack plugin resolved npm version did not match the reviewed version.'
+    }
+    $resolvedSpec = [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'resolvedSpec')
+    if (-not [string]::IsNullOrWhiteSpace($resolvedSpec) -and $resolvedSpec -ne $expectedSpec) {
+        throw 'The Slack plugin resolved npm spec did not match the reviewed exact package.'
+    }
+    $installPath = [string](Get-OpenClawObjectPropertyValue -InputObject $install -Name 'installPath')
+    $pluginRoot = [string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'rootDir')
+    $activePluginPath = if ([string]::IsNullOrWhiteSpace($pluginRoot)) {
+        [string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'source')
+    }
+    else {
+        $pluginRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($installPath) -or [string]::IsNullOrWhiteSpace($activePluginPath) -or
+        -not (Test-OpenClawPathContainedBy -CandidatePath $activePluginPath -RootPath $installPath)) {
+        throw 'The active Slack plugin source was not inside its recorded managed npm installation.'
+    }
+
+    return [pscustomobject]@{
+        Ready = $true
+        Id = $expectedId
+        Package = $expectedPackage
+        Version = $expectedVersion
+        InstallSpec = $expectedSpec
+        NpmIntegrity = $expectedIntegrity
+        NpmShasum = $expectedShasum.ToLowerInvariant()
+        InstallPath = [IO.Path]::GetFullPath($installPath)
+    }
+}
+
+function Assert-OpenClawSlackPluginInspection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Inspection,
+
+        [object]$SourceConfig = $(Get-OpenClawSourceConfig)
+    )
+
+    $verifiedProvenance = Assert-OpenClawSlackPluginProvenance -Inspection $Inspection -SourceConfig $SourceConfig
+    $plugin = Get-OpenClawObjectPropertyValue -InputObject $Inspection -Name 'plugin'
+    if ([string](Get-OpenClawObjectPropertyValue -InputObject $plugin -Name 'status') -ne 'loaded') {
+        throw 'The exact Slack plugin was not loaded by runtime inspection.'
+    }
+
+    $capabilitiesValue = Get-OpenClawObjectPropertyValue -InputObject $Inspection -Name 'capabilities'
+    $capabilities = @()
+    if ($null -ne $capabilitiesValue) {
+        $capabilities = @($capabilitiesValue)
+    }
+    $channelCapabilities = @($capabilities | Where-Object {
+        [string](Get-OpenClawObjectPropertyValue -InputObject $_ -Name 'kind') -eq 'channel'
+    })
+    if ($channelCapabilities.Count -ne 1) {
+        throw 'The Slack plugin runtime inspection did not contain one channel capability.'
+    }
+    $capabilityIdsValue = Get-OpenClawObjectPropertyValue -InputObject $channelCapabilities[0] -Name 'ids'
+    $capabilityIds = @()
+    if ($null -ne $capabilityIdsValue) {
+        $capabilityIds = @($capabilityIdsValue)
+    }
+    if ($capabilityIds.Count -ne 1 -or [string]$capabilityIds[0] -ne [string]$SourceConfig.slackPlugin.id) {
+        throw 'The Slack plugin runtime channel capability did not match the reviewed Slack id.'
+    }
+    return $verifiedProvenance
+}
+
+function ConvertTo-OpenClawWindowsCommandArgument {
+    param(
+        [AllowEmptyString()]
+        [string]$Argument
+    )
+
+    if ($null -eq $Argument) {
+        $Argument = ''
+    }
+    if ($Argument.Length -gt 32760) {
+        throw 'An OpenClaw command argument exceeded the Windows limit.'
+    }
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $builder = New-Object Text.StringBuilder
+    [void]$builder.Append([char]34)
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes++
+            continue
+        }
+        if ($character -eq [char]34) {
+            if ($backslashes -gt 0) {
+                [void]$builder.Append([char]92, ($backslashes * 2))
+            }
+            [void]$builder.Append([char]92)
+            [void]$builder.Append([char]34)
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append([char]92, $backslashes)
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append([char]92, ($backslashes * 2))
+    }
+    [void]$builder.Append([char]34)
+    return $builder.ToString()
+}
+
+function Invoke-OpenClawCapturedCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Invocation,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [int]$TimeoutMilliseconds = 120000
+    )
+
+    $allArguments = @($Invocation.PrefixArguments) + @($Arguments)
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = [IO.Path]::GetFullPath([string]$Invocation.Executable)
+    $startInfo.Arguments = (@($allArguments | ForEach-Object { ConvertTo-OpenClawWindowsCommandArgument -Argument ([string]$_) }) -join ' ')
+    $startInfo.WorkingDirectory = $script:ProjectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    $startInfo.StandardOutputEncoding = $utf8
+    $startInfo.StandardErrorEncoding = $utf8
+
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'The trusted OpenClaw command did not start.'
+        }
+        $standardOutput = $process.StandardOutput.ReadToEndAsync()
+        $standardError = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            try { $process.Kill() } catch { }
+            throw 'The trusted OpenClaw command timed out.'
+        }
+        $stdout = [string]$standardOutput.Result
+        $stderr = [string]$standardError.Result
+        if ($stdout.Length -gt 16MB -or $stderr.Length -gt 1MB) {
+            throw 'The trusted OpenClaw command returned more output than allowed.'
+        }
+        return [pscustomobject]@{
+            Arguments = @($Arguments)
+            ExitCode = [int]$process.ExitCode
+            Succeeded = $process.ExitCode -eq 0
+            Stdout = $stdout
+            SafeError = Protect-OpenClawLogText -Text $stderr -MaximumLength 2048
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function ConvertFrom-OpenClawCommandJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Result,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    if (-not $Result.Succeeded) {
+        throw ("OpenClaw {0} failed safely with exit code {1}." -f $Context, $Result.ExitCode)
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Result.Stdout)) {
+        throw ("OpenClaw {0} returned no JSON." -f $Context)
+    }
+    try {
+        return ([string]$Result.Stdout | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch {
+        throw ("OpenClaw {0} returned invalid JSON." -f $Context)
+    }
+}
+
+function Get-OpenClawSlackPluginInventoryEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Invocation,
+
+        [Parameter(Mandatory = $true)]
+        [object]$SourceConfig
+    )
+
+    $result = Invoke-OpenClawCapturedCommand -Invocation $Invocation -Arguments @('plugins', 'list', '--json')
+    $inventory = ConvertFrom-OpenClawCommandJson -Result $result -Context 'plugin inventory'
+    $pluginsProperty = $inventory.PSObject.Properties['plugins']
+    if ($null -eq $pluginsProperty) {
+        throw 'OpenClaw plugin inventory JSON did not contain a plugins array.'
+    }
+    $diagnosticsValue = Get-OpenClawObjectPropertyValue -InputObject $inventory -Name 'diagnostics'
+    $diagnostics = @()
+    if ($null -ne $diagnosticsValue) {
+        $diagnostics = @($diagnosticsValue)
+    }
+    $registry = Get-OpenClawObjectPropertyValue -InputObject $inventory -Name 'registry'
+    $registryDiagnosticsValue = Get-OpenClawObjectPropertyValue -InputObject $registry -Name 'diagnostics'
+    $registryDiagnostics = @()
+    if ($null -ne $registryDiagnosticsValue) {
+        $registryDiagnostics = @($registryDiagnosticsValue)
+    }
+    if (@($diagnostics + $registryDiagnostics | Where-Object {
+        [string](Get-OpenClawObjectPropertyValue -InputObject $_ -Name 'level') -eq 'error'
+    }).Count -gt 0) {
+        throw 'OpenClaw plugin inventory reported an error and could not establish safe absence.'
+    }
+
+    $pluginId = [string]$SourceConfig.slackPlugin.id
+    $matches = @(@($pluginsProperty.Value) | Where-Object {
+        [string](Get-OpenClawObjectPropertyValue -InputObject $_ -Name 'id') -eq $pluginId
+    })
+    if ($matches.Count -gt 1) {
+        throw 'OpenClaw plugin inventory contained duplicate Slack plugin ids.'
+    }
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+    return $matches[0]
+}
+
+function Get-OpenClawSlackPluginInspection {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Invocation,
+
+        [Parameter(Mandatory = $true)]
+        [object]$SourceConfig
+    )
+
+    $pluginId = [string]$SourceConfig.slackPlugin.id
+    $snapshotResult = Invoke-OpenClawCapturedCommand -Invocation $Invocation -Arguments @('plugins', 'inspect', $pluginId, '--json')
+    $snapshotInspection = ConvertFrom-OpenClawCommandJson -Result $snapshotResult -Context 'Slack plugin snapshot inspection'
+    [void](Assert-OpenClawSlackPluginProvenance -Inspection $snapshotInspection -SourceConfig $SourceConfig)
+
+    $runtimeResult = Invoke-OpenClawCapturedCommand -Invocation $Invocation -Arguments @('plugins', 'inspect', $pluginId, '--runtime', '--json')
+    $runtimeInspection = ConvertFrom-OpenClawCommandJson -Result $runtimeResult -Context 'Slack plugin runtime inspection'
+    return Assert-OpenClawSlackPluginInspection -Inspection $runtimeInspection -SourceConfig $SourceConfig
+}
+
+function Ensure-OpenClawSlackPlugin {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$SourceConfig,
+
+        [string]$StateDirectory
+    )
+
+    Update-OpenClawProcessPath
+    $invocation = Resolve-OpenClawInvocation -StateDirectory $StateDirectory
+    if ($null -eq $invocation) {
+        throw 'OpenClaw was not found before the official Slack plugin stage.'
+    }
+
+    $existing = Get-OpenClawSlackPluginInventoryEntry -Invocation $invocation -SourceConfig $SourceConfig
+    if ($null -ne $existing) {
+        $verified = Get-OpenClawSlackPluginInspection -Invocation $invocation -SourceConfig $SourceConfig
+        return [pscustomobject]@{ Ready = $true; Changed = $false; Verification = $verified }
+    }
+
+    $installSpec = [string]$SourceConfig.slackPlugin.installSpec
+    if (-not $PSCmdlet.ShouldProcess($installSpec, 'Install and provenance-check the exact official Slack plugin')) {
+        return [pscustomobject]@{ Ready = $false; Changed = $false; Declined = $true }
+    }
+    $installResult = Invoke-OpenClawCapturedCommand -Invocation $invocation -Arguments @('plugins', 'install', $installSpec, '--pin') -TimeoutMilliseconds 300000
+    if (-not $installResult.Succeeded) {
+        throw ("The exact official Slack plugin installation failed safely with exit code {0}." -f $installResult.ExitCode)
+    }
+    $verified = Get-OpenClawSlackPluginInspection -Invocation $invocation -SourceConfig $SourceConfig
+    return [pscustomobject]@{ Ready = $true; Changed = $true; Verification = $verified }
+}
+
+function Invoke-OpenClawSlackPluginWorkflowStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$SourceConfig,
+
+        [string]$StateDirectory,
+
+        [bool]$SuppressConfirmation,
+
+        [bool]$ForceConfirmation
+    )
+
+    if ($SuppressConfirmation) {
+        return Ensure-OpenClawSlackPlugin -SourceConfig $SourceConfig -StateDirectory $StateDirectory -Confirm:$false
+    }
+    if ($ForceConfirmation) {
+        return Ensure-OpenClawSlackPlugin -SourceConfig $SourceConfig -StateDirectory $StateDirectory -Confirm:$true
+    }
+    return Ensure-OpenClawSlackPlugin -SourceConfig $SourceConfig -StateDirectory $StateDirectory
 }
 
 function Start-OpenClawOnboarding {
@@ -1720,6 +2182,7 @@ function Install-OpenClawOfficial {
             [void]$PSCmdlet.ShouldProcess(("{0} {1}" -f $sourceConfig.node.winget.id, $sourceConfig.node.winget.version), 'Install the exact Node.js package from the WinGet source')
         }
         [void]$PSCmdlet.ShouldProcess('This Windows user account', ("Install pinned OpenClaw {0}" -f $targetVersion))
+        [void]$PSCmdlet.ShouldProcess([string]$sourceConfig.slackPlugin.installSpec, 'Install and provenance-check the exact official Slack plugin')
         return
     }
 
@@ -1871,11 +2334,28 @@ function Install-OpenClawOfficial {
             foreach ($skippedStage in @('download', 'integrity', 'dryRun')) {
                 $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId $skippedStage -Status 'Skipped' -Detail $decision.Decision
             }
-            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail $decision.Decision
         }
         else {
             Write-Host '검증된 OpenClaw 설치 단계는 다시 실행하지 않고 다음 단계부터 이어갑니다.' -ForegroundColor Cyan
         }
+
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Running' -Detail 'Validating the exact official Slack plugin.'
+        try {
+            $slackPluginResult = Invoke-OpenClawSlackPluginWorkflowStage -SourceConfig $sourceConfig -StateDirectory $StateDirectory -SuppressConfirmation $suppressNestedConfirmation -ForceConfirmation $forceNestedConfirmation
+        }
+        catch {
+            $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Slack plugin provenance or installation failure.'
+            if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                $_.Exception.Data['OpenClawFailureKind'] = 'Install'
+            }
+            throw
+        }
+        if ($null -eq $slackPluginResult -or -not $slackPluginResult.Ready) {
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Pending' -Detail 'Slack plugin installation confirmation was declined.'
+            return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
+        }
+        $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail ("{0}; Slack plugin {1}" -f $decision.Decision, $sourceConfig.slackPlugin.version)
+        Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
 
         $priorOnboarding = @($checkpoint.Steps | Where-Object { $_.Id -eq 'onboard' -and $_.Status -eq 'Succeeded' })
         if ($SkipOnboarding -and $resumePoint -ne 'Verify') {
@@ -2026,7 +2506,21 @@ function Install-OpenClawOfficial {
                 $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Provenance receipt failure.'
                 throw (New-OpenClawTaggedException -Kind 'Install' -Message 'The installed OpenClaw files could not be recorded for safe later execution.')
             }
-            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail ("OpenClaw {0}" -f $installed.Version)
+            try {
+                $slackPluginResult = Invoke-OpenClawSlackPluginWorkflowStage -SourceConfig $sourceConfig -StateDirectory $StateDirectory -SuppressConfirmation $suppressNestedConfirmation -ForceConfirmation $forceNestedConfirmation
+            }
+            catch {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Slack plugin provenance or installation failure.'
+                if (-not $_.Exception.Data.Contains('OpenClawFailureKind')) {
+                    $_.Exception.Data['OpenClawFailureKind'] = 'Install'
+                }
+                throw
+            }
+            if ($null -eq $slackPluginResult -or -not $slackPluginResult.Ready) {
+                $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Pending' -Detail 'Slack plugin installation confirmation was declined.'
+                return [pscustomobject]@{ Decision = 'Cancelled'; TargetVersion = $targetVersion.ToString(); CheckpointPath = $checkpoint.Path; LogPath = $LogPath }
+            }
+            $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Succeeded' -Detail ("OpenClaw {0}; Slack plugin {1}" -f $installed.Version, $sourceConfig.slackPlugin.version)
             Assert-OpenClawCancellationNotRequested -Path $CancellationPath -StateDirectory $StateDirectory
 
             if ($SkipOnboarding) {
@@ -2105,6 +2599,17 @@ function Invoke-OpenClawVerification {
         throw 'OpenClaw was not found on PATH.'
     }
 
+    Write-Host 'Running: Slack plugin provenance' -ForegroundColor Cyan
+    $slackPluginVerification = try {
+        $sourceConfig = Get-OpenClawSourceConfig
+        [void](Get-OpenClawSlackPluginInspection -Invocation $openClawInvocation -SourceConfig $sourceConfig)
+        [pscustomobject]@{ Name = 'Slack plugin provenance'; ExitCode = 0; Passed = $true }
+    }
+    catch {
+        Write-Warning (Protect-OpenClawLogText -Text $_.Exception.Message -MaximumLength 2048)
+        [pscustomobject]@{ Name = 'Slack plugin provenance'; ExitCode = 1; Passed = $false }
+    }
+
     $steps = @(
         [pscustomobject]@{ Name = 'Version'; Arguments = @('--version') }
         [pscustomobject]@{ Name = 'Doctor'; Arguments = @('doctor') }
@@ -2125,7 +2630,7 @@ function Invoke-OpenClawVerification {
         }
     }
 
-    return $results
+    return @($slackPluginVerification) + @($results)
 }
 
 Export-ModuleMember -Function @(
@@ -2161,6 +2666,8 @@ Export-ModuleMember -Function @(
     'Install-OpenClawNodePrerequisite',
     'Update-OpenClawProcessPath',
     'Resolve-OpenClawInvocation',
+    'Assert-OpenClawSlackPluginProvenance',
+    'Assert-OpenClawSlackPluginInspection',
     'Start-OpenClawOnboarding',
     'Install-OpenClawOfficial',
     'Invoke-OpenClawVerification'

@@ -31,14 +31,15 @@
 - System-color, keyboard, DPI, and screen-reader accessibility metadata
 - Dependency-free GUI tests for PowerShell 5.1 and PowerShell 7
 - Korean safe-setup wizard for OpenAI, Anthropic, and Google provider/model selection
-- Optional Telegram and Discord setup with WPF `PasswordBox` secret inputs
+- Slack-first optional channel setup with two Slack Socket Mode `PasswordBox` secrets, followed by Telegram and Discord
+- Exact official `@openclaw/slack@2026.7.1` plugin install with npm integrity and shasum provenance verification before any runtime load
 - Windows Credential Manager storage using run-scoped credential IDs and a native OpenClaw exec SecretRef resolver
 - Live OpenClaw `config schema`, existing-config validation, and `config patch --stdin --dry-run --json` checks
 - SHA-256 schema/config freshness checks and an approved-plan fingerprint before configuration writes
 - Redacted merge-patch preview with a separate, default-off user approval boundary
 - Local loopback Gateway with a generated 256-bit token, Tailscale and terminal disabled
 - Messaging tool profile with explicit runtime, filesystem, automation, UI, node, plugin, MCP-bundle, and elevated-tool denial
-- Safe Telegram/Discord defaults: DM pairing, groups disabled, and channel configuration writes disabled
+- Safe Slack/Telegram/Discord defaults: DM pairing, groups disabled, and channel configuration writes disabled; Slack also disables group DMs, native/slash commands, name matching, and bot messages
 - Post-apply configuration, SecretRef, security, model, channel, Gateway service, and RPC checks
 - Crash-safe `Preparing` → `AppliedPendingChecks` → terminal recovery receipts with exact credential IDs, configuration hashes, atomic updates, and sanitized failed-check details
 - Startup recovery guards plus same-ID model/channel credential replacement, stable Gateway tokens, Gateway restart, and semantic re-verification
@@ -46,6 +47,7 @@
 - Value-free SecretRef binding through successful official patch provenance and configuration byte-hash continuity, with explicitly approved patch replay after drift
 - Fail-closed Gateway mutation gates plus recovery-time OpenClaw version, schema, and active-config compatibility checks
 - Durable all-secret replacement intent so an interrupted same-ID update requires the complete receipt-bound credential set again
+- Safe-settings plan and recovery receipt schema v2, with validated terminal v1 compatibility and fail-closed guidance for unfinished v1 work
 - Provenance receipt schema v2 with a retained full-content digest, fast metadata-tree verification, always-hashed critical files, and full-digest fallback
 - Windows PowerShell 5.1-compatible UTF-8 stdin for official OpenClaw JSON patch commands
 

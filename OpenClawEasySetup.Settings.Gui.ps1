@@ -20,6 +20,7 @@ $definition = [ordered]@{
     }
     InteractiveControls = @(
         'ProviderComboBox', 'ModelComboBox', 'ApiKeyPasswordBox',
+        'SlackCheckBox', 'SlackBotTokenPasswordBox', 'SlackAppTokenPasswordBox',
         'TelegramCheckBox', 'TelegramTokenPasswordBox',
         'DiscordCheckBox', 'DiscordTokenPasswordBox',
         'PreviewButton', 'PreviewTextBox', 'ApprovalCheckBox',
@@ -239,6 +240,7 @@ catch {
 $controlNames = @(
     'MainScrollViewer', 'SettingsContentPanel',
     'ProviderComboBox', 'ModelComboBox', 'ApiKeyPasswordBox',
+    'SlackCheckBox', 'SlackBotTokenPasswordBox', 'SlackAppTokenPasswordBox',
     'TelegramCheckBox', 'TelegramTokenPasswordBox',
     'DiscordCheckBox', 'DiscordTokenPasswordBox',
     'PreviewButton', 'PreviewTextBox', 'ApprovalCheckBox',
@@ -457,7 +459,7 @@ function Clear-SettingsSecretInputs {
     $previousSuppression = [bool]$state.SuppressInputEvents
     $state.SuppressInputEvents = $true
     try {
-        foreach ($passwordBoxName in @('ApiKeyPasswordBox', 'TelegramTokenPasswordBox', 'DiscordTokenPasswordBox')) {
+        foreach ($passwordBoxName in @('ApiKeyPasswordBox', 'SlackBotTokenPasswordBox', 'SlackAppTokenPasswordBox', 'TelegramTokenPasswordBox', 'DiscordTokenPasswordBox')) {
             $controls[$passwordBoxName].Clear()
         }
     }
@@ -476,6 +478,11 @@ function Test-SettingsInputsValid {
         return $false
     }
     if ((Get-SettingsPasswordLength -PasswordBox $controls['ApiKeyPasswordBox']) -eq 0) {
+        return $false
+    }
+    if ($controls['SlackCheckBox'].IsChecked -eq $true -and
+        ((Get-SettingsPasswordLength -PasswordBox $controls['SlackBotTokenPasswordBox']) -eq 0 -or
+        (Get-SettingsPasswordLength -PasswordBox $controls['SlackAppTokenPasswordBox']) -eq 0)) {
         return $false
     }
     if ($controls['TelegramCheckBox'].IsChecked -eq $true -and (Get-SettingsPasswordLength -PasswordBox $controls['TelegramTokenPasswordBox']) -eq 0) {
@@ -504,6 +511,11 @@ function Test-SettingsRecoveryInputsValid {
     if ($null -eq $plan -or (Get-SettingsPasswordLength -PasswordBox $controls['ApiKeyPasswordBox']) -eq 0) {
         return $false
     }
+    if ((Get-SettingsMemberValue -InputObject $plan -Names @('EnableSlack')) -eq $true -and
+        ((Get-SettingsPasswordLength -PasswordBox $controls['SlackBotTokenPasswordBox']) -eq 0 -or
+        (Get-SettingsPasswordLength -PasswordBox $controls['SlackAppTokenPasswordBox']) -eq 0)) {
+        return $false
+    }
     if ((Get-SettingsMemberValue -InputObject $plan -Names @('EnableTelegram')) -eq $true -and
         (Get-SettingsPasswordLength -PasswordBox $controls['TelegramTokenPasswordBox']) -eq 0) {
         return $false
@@ -516,7 +528,7 @@ function Test-SettingsRecoveryInputsValid {
 }
 
 function Test-SettingsAnyRecoverySecretEntered {
-    foreach ($passwordBoxName in @('ApiKeyPasswordBox', 'TelegramTokenPasswordBox', 'DiscordTokenPasswordBox')) {
+    foreach ($passwordBoxName in @('ApiKeyPasswordBox', 'SlackBotTokenPasswordBox', 'SlackAppTokenPasswordBox', 'TelegramTokenPasswordBox', 'DiscordTokenPasswordBox')) {
         if ((Get-SettingsPasswordLength -PasswordBox $controls[$passwordBoxName]) -gt 0) {
             return $true
         }
@@ -619,12 +631,19 @@ function Invalidate-SettingsPreview {
 }
 
 function Update-SettingsChannelState {
+    $slackEnabled = $controls['SlackCheckBox'].IsChecked -eq $true
     $telegramEnabled = $controls['TelegramCheckBox'].IsChecked -eq $true
     $discordEnabled = $controls['DiscordCheckBox'].IsChecked -eq $true
     $recoveryReplaceEnabled = (-not $state.Busy) -and (Test-SettingsRecoveryCanReplace)
     $normalInputEnabled = (-not $state.Busy) -and (-not $state.PartialApplied)
+    $controls['SlackBotTokenPasswordBox'].IsEnabled = ($normalInputEnabled -or $recoveryReplaceEnabled) -and $slackEnabled
+    $controls['SlackAppTokenPasswordBox'].IsEnabled = ($normalInputEnabled -or $recoveryReplaceEnabled) -and $slackEnabled
     $controls['TelegramTokenPasswordBox'].IsEnabled = ($normalInputEnabled -or $recoveryReplaceEnabled) -and $telegramEnabled
     $controls['DiscordTokenPasswordBox'].IsEnabled = ($normalInputEnabled -or $recoveryReplaceEnabled) -and $discordEnabled
+    if (-not $slackEnabled) {
+        $controls['SlackBotTokenPasswordBox'].Clear()
+        $controls['SlackAppTokenPasswordBox'].Clear()
+    }
     if (-not $telegramEnabled) {
         $controls['TelegramTokenPasswordBox'].Clear()
     }
@@ -659,7 +678,7 @@ function Set-SettingsBusy {
 
     $state.Busy = $Busy
     $controls['BusyProgressBar'].Visibility = if ($Busy) { [Windows.Visibility]::Visible } else { [Windows.Visibility]::Collapsed }
-    foreach ($controlName in @('ProviderComboBox', 'ModelComboBox', 'TelegramCheckBox', 'DiscordCheckBox')) {
+    foreach ($controlName in @('ProviderComboBox', 'ModelComboBox', 'SlackCheckBox', 'TelegramCheckBox', 'DiscordCheckBox')) {
         $controls[$controlName].IsEnabled = (-not $Busy) -and (-not $state.PartialApplied)
     }
     $controls['ApiKeyPasswordBox'].IsEnabled = (-not $Busy) -and ((-not $state.PartialApplied) -or (Test-SettingsRecoveryCanReplace))
@@ -785,6 +804,7 @@ function Set-SettingsPendingRecoveryView {
         $controls['ProviderComboBox'].SelectedItem = $providerItem[0]
         $controls['ModelComboBox'].ItemsSource = @($providerItem[0].Models)
         $controls['ModelComboBox'].SelectedItem = $modelItem[0]
+        $controls['SlackCheckBox'].IsChecked = (Get-SettingsMemberValue -InputObject $plan -Names @('EnableSlack')) -eq $true
         $controls['TelegramCheckBox'].IsChecked = (Get-SettingsMemberValue -InputObject $plan -Names @('EnableTelegram')) -eq $true
         $controls['DiscordCheckBox'].IsChecked = (Get-SettingsMemberValue -InputObject $plan -Names @('EnableDiscord')) -eq $true
         $controls['ApprovalCheckBox'].IsChecked = $false
@@ -817,7 +837,7 @@ function Set-SettingsPendingRecoveryView {
             'Credential replacement recovery'
         ) -and (Get-SettingsMemberValue -InputObject $_ -Names @('Passed')) -ne $true
     }).Count -gt 0
-    foreach ($controlName in @('ProviderComboBox', 'ModelComboBox', 'TelegramCheckBox', 'DiscordCheckBox')) {
+    foreach ($controlName in @('ProviderComboBox', 'ModelComboBox', 'SlackCheckBox', 'TelegramCheckBox', 'DiscordCheckBox')) {
         $controls[$controlName].IsEnabled = $false
     }
     $controls['ApiKeyPasswordBox'].IsEnabled = (-not $state.Busy) -and (Test-SettingsRecoveryCanReplace)
@@ -1012,6 +1032,26 @@ $controls['ApiKeyPasswordBox'].add_PasswordChanged({
         }
     }
 })
+$controls['SlackCheckBox'].add_Click({
+    if ($state.SuppressInputEvents) {
+        return
+    }
+    Update-SettingsChannelState
+    Invalidate-SettingsPreview -Announce:$true
+})
+foreach ($slackPasswordBoxName in @('SlackBotTokenPasswordBox', 'SlackAppTokenPasswordBox')) {
+    $controls[$slackPasswordBoxName].add_PasswordChanged({
+        if (-not $state.SuppressInputEvents) {
+            if ($null -ne $state.PendingRecovery) {
+                $controls['ApprovalCheckBox'].IsChecked = $false
+                Update-SettingsActionState
+            }
+            else {
+                Invalidate-SettingsPreview -Announce:$false
+            }
+        }
+    })
+}
 $controls['TelegramCheckBox'].add_Click({
     if ($state.SuppressInputEvents) {
         return
@@ -1100,6 +1140,7 @@ $controls['PreviewButton'].add_Click({
     try {
         $providerId = [string]$controls['ProviderComboBox'].SelectedItem.Id
         $modelId = [string]$controls['ModelComboBox'].SelectedItem.Id
+        $enableSlack = $controls['SlackCheckBox'].IsChecked -eq $true
         $enableTelegram = $controls['TelegramCheckBox'].IsChecked -eq $true
         $enableDiscord = $controls['DiscordCheckBox'].IsChecked -eq $true
 
@@ -1107,6 +1148,7 @@ $controls['PreviewButton'].add_Click({
         $plan = New-OpenClawSafeSetupPlan `
             -ProviderId $providerId `
             -ModelId $modelId `
+            -EnableSlack:$enableSlack `
             -EnableTelegram:$enableTelegram `
             -EnableDiscord:$enableDiscord `
             -StateDirectory $effectiveStateDirectory
@@ -1190,6 +1232,14 @@ $controls['ApplyButton'].add_Click({
                 $modelApiKey = Copy-SettingsPasswordSecret -PasswordBox $controls['ApiKeyPasswordBox']
                 $recoveryOwnedSecrets.Add($modelApiKey)
                 $recoveryCredentialMap['ModelApiKey'] = $modelApiKey
+                if ((Get-SettingsMemberValue -InputObject $pendingPlan -Names @('EnableSlack')) -eq $true) {
+                    $slackBotToken = Copy-SettingsPasswordSecret -PasswordBox $controls['SlackBotTokenPasswordBox']
+                    $recoveryOwnedSecrets.Add($slackBotToken)
+                    $recoveryCredentialMap['SlackBotToken'] = $slackBotToken
+                    $slackAppToken = Copy-SettingsPasswordSecret -PasswordBox $controls['SlackAppTokenPasswordBox']
+                    $recoveryOwnedSecrets.Add($slackAppToken)
+                    $recoveryCredentialMap['SlackAppToken'] = $slackAppToken
+                }
                 if ((Get-SettingsMemberValue -InputObject $pendingPlan -Names @('EnableTelegram')) -eq $true) {
                     $telegramBotToken = Copy-SettingsPasswordSecret -PasswordBox $controls['TelegramTokenPasswordBox']
                     $recoveryOwnedSecrets.Add($telegramBotToken)
@@ -1265,6 +1315,14 @@ $controls['ApplyButton'].add_Click({
         $ownedSecrets.Add($modelApiKey)
         $credentialMap['ModelApiKey'] = $modelApiKey
 
+        if ($controls['SlackCheckBox'].IsChecked -eq $true) {
+            $slackBotToken = Copy-SettingsPasswordSecret -PasswordBox $controls['SlackBotTokenPasswordBox']
+            $ownedSecrets.Add($slackBotToken)
+            $credentialMap['SlackBotToken'] = $slackBotToken
+            $slackAppToken = Copy-SettingsPasswordSecret -PasswordBox $controls['SlackAppTokenPasswordBox']
+            $ownedSecrets.Add($slackAppToken)
+            $credentialMap['SlackAppToken'] = $slackAppToken
+        }
         if ($controls['TelegramCheckBox'].IsChecked -eq $true) {
             $telegramBotToken = Copy-SettingsPasswordSecret -PasswordBox $controls['TelegramTokenPasswordBox']
             $ownedSecrets.Add($telegramBotToken)
@@ -1564,6 +1622,12 @@ if ($SmokeTest) {
         [string]::IsNullOrWhiteSpace([Windows.Automation.AutomationProperties]::GetName($controls[$_]))
     })
     $missingTabIndexes = @($interactiveNames | Where-Object { $controls[$_].TabIndex -lt 0 })
+    $controls['SlackCheckBox'].IsChecked = $true
+    $controls['SlackCheckBox'].RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    $slackTokensEnabled = [bool]$controls['SlackBotTokenPasswordBox'].IsEnabled -and
+        [bool]$controls['SlackAppTokenPasswordBox'].IsEnabled
+    $controls['SlackCheckBox'].IsChecked = $false
+    Update-SettingsChannelState
     $controls['TelegramCheckBox'].IsChecked = $true
     $controls['TelegramCheckBox'].RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
     $telegramTokenEnabled = [bool]$controls['TelegramTokenPasswordBox'].IsEnabled
@@ -1581,6 +1645,7 @@ if ($SmokeTest) {
         Plan = [pscustomobject]@{
             ProviderId = 'openai'
             ModelId = 'smoke-openai-model'
+            EnableSlack = $true
             EnableTelegram = $true
             EnableDiscord = $false
         }
@@ -1588,9 +1653,12 @@ if ($SmokeTest) {
     Set-SettingsPendingRecoveryView -Recovery $smokePendingRecovery
     $pendingSelectionLocked = -not [bool]$controls['ProviderComboBox'].IsEnabled -and
         -not [bool]$controls['ModelComboBox'].IsEnabled -and
+        -not [bool]$controls['SlackCheckBox'].IsEnabled -and
         -not [bool]$controls['TelegramCheckBox'].IsEnabled -and
         -not [bool]$controls['DiscordCheckBox'].IsEnabled
     $pendingSecretReplacementAvailable = [bool]$controls['ApiKeyPasswordBox'].IsEnabled -and
+        [bool]$controls['SlackBotTokenPasswordBox'].IsEnabled -and
+        [bool]$controls['SlackAppTokenPasswordBox'].IsEnabled -and
         [bool]$controls['TelegramTokenPasswordBox'].IsEnabled -and
         -not [bool]$controls['DiscordTokenPasswordBox'].IsEnabled
     $pendingReadOnlyRecheckEnabled = [bool]$controls['PreviewButton'].IsEnabled -and
@@ -1639,6 +1707,7 @@ if ($SmokeTest) {
         ApprovalDefaultOff = $approvalDefaultOff
         ApplyDefaultDisabled = $applyDefaultDisabled
         CancelIsDefault = [bool]$controls['CancelButton'].IsDefault
+        SlackTokensFollowSelection = $slackTokensEnabled
         TelegramTokenFollowsSelection = $telegramTokenEnabled
         PreviewWraps = $controls['PreviewTextBox'].TextWrapping -eq [Windows.TextWrapping]::Wrap
         VerticalScrolling = $controls['MainScrollViewer'].VerticalScrollBarVisibility -eq [Windows.Controls.ScrollBarVisibility]::Auto
@@ -1653,6 +1722,8 @@ if ($SmokeTest) {
         PendingCredentialReplacementRequired = $pendingCredentialReplacementRequired
         ExternalApiCalls = [int]$state.ExternalApiCalls
         SecretsCleared = (Get-SettingsPasswordLength -PasswordBox $controls['ApiKeyPasswordBox']) -eq 0 -and
+            (Get-SettingsPasswordLength -PasswordBox $controls['SlackBotTokenPasswordBox']) -eq 0 -and
+            (Get-SettingsPasswordLength -PasswordBox $controls['SlackAppTokenPasswordBox']) -eq 0 -and
             (Get-SettingsPasswordLength -PasswordBox $controls['TelegramTokenPasswordBox']) -eq 0 -and
             (Get-SettingsPasswordLength -PasswordBox $controls['DiscordTokenPasswordBox']) -eq 0
     } | ConvertTo-Json -Compress

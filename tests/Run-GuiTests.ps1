@@ -340,11 +340,18 @@ try {
     $settingsNamespaceManager.AddNamespace('w', 'http://schemas.microsoft.com/winfx/2006/xaml/presentation')
     $settingsNamespaceManager.AddNamespace('x', 'http://schemas.microsoft.com/winfx/2006/xaml')
     $settingsInteractiveNodes = @($settingsXaml.SelectNodes('//w:Button | //w:CheckBox | //w:TextBox | //w:ComboBox | //w:PasswordBox', $settingsNamespaceManager))
-    Assert-Equal -Actual $settingsInteractiveNodes.Count -Expected 13 -Name 'Settings wizard exposes the reviewed interactive control count'
+    Assert-Equal -Actual $settingsInteractiveNodes.Count -Expected 16 -Name 'Settings wizard exposes the reviewed interactive control count'
     Assert-True -Condition (@($settingsInteractiveNodes | Where-Object { [string]::IsNullOrWhiteSpace($_.TabIndex) }).Count -eq 0) -Name 'Every settings wizard control has an explicit tab index'
     Assert-True -Condition (@($settingsInteractiveNodes | Where-Object { [string]::IsNullOrWhiteSpace($_.'AutomationProperties.Name') }).Count -eq 0) -Name 'Every settings wizard control has an accessible name'
     $settingsTabIndices = @($settingsInteractiveNodes | ForEach-Object { [int]$_.TabIndex })
     Assert-Equal -Actual @($settingsTabIndices | Sort-Object -Unique).Count -Expected $settingsTabIndices.Count -Name 'Settings wizard tab indexes are unique'
+    $slackCheckBoxNode = $settingsXaml.SelectSingleNode("//w:CheckBox[@x:Name='SlackCheckBox']", $settingsNamespaceManager)
+    $slackBotTokenNode = $settingsXaml.SelectSingleNode("//w:PasswordBox[@x:Name='SlackBotTokenPasswordBox']", $settingsNamespaceManager)
+    $slackAppTokenNode = $settingsXaml.SelectSingleNode("//w:PasswordBox[@x:Name='SlackAppTokenPasswordBox']", $settingsNamespaceManager)
+    $telegramCheckBoxNode = $settingsXaml.SelectSingleNode("//w:CheckBox[@x:Name='TelegramCheckBox']", $settingsNamespaceManager)
+    $discordCheckBoxNode = $settingsXaml.SelectSingleNode("//w:CheckBox[@x:Name='DiscordCheckBox']", $settingsNamespaceManager)
+    Assert-True -Condition ($null -ne $slackCheckBoxNode -and $null -ne $slackBotTokenNode -and $null -ne $slackAppTokenNode) -Name 'Slack uses one optional selector and two masked token inputs'
+    Assert-True -Condition ([int]$slackCheckBoxNode.TabIndex -lt [int]$telegramCheckBoxNode.TabIndex -and [int]$telegramCheckBoxNode.TabIndex -lt [int]$discordCheckBoxNode.TabIndex) -Name 'Slack appears before Telegram and Discord in keyboard order'
     Assert-True -Condition ([int]$settingsXaml.Window.MinWidth -le 520 -and [int]$settingsXaml.Window.MinHeight -le 320 -and $null -ne $settingsXaml.SelectSingleNode('//w:ScrollViewer', $settingsNamespaceManager)) -Name 'Settings wizard fits constrained high-DPI desktops through its scrollable layout'
 
     $settingsGuiSource = Get-Content -LiteralPath $settingsGuiEntryPoint -Raw -Encoding UTF8
@@ -368,7 +375,8 @@ try {
     Assert-True -Condition ($recoveryApplySource.Contains('-CredentialMap $recoveryCredentialMap') -and $recoveryApplySource.Contains('-AcceptConfigChange:$acceptConfigChange') -and $recoveryApplySource.Contains('-EnsureGatewayService') -and $recoveryApplySource.Contains('$replaceRecoverySecrets = $credentialReplacementRequired -or $anyRecoverySecret') -and -not $recoveryApplySource.Contains('New-OpenClawGatewayToken')) -Name 'Approved recovery can restart, restore the approved patch after drift, and replace model/channel secrets without rotating the Gateway token'
     Assert-True -Condition ($settingsGuiSource.Contains('Configuration drift recovery authorization') -and $settingsGuiSource.Contains('PendingDriftRestoreAvailable') -and $settingsGuiSource.Contains('$state.AcceptConfigChangeRequired')) -Name 'Drift consent is wired to fingerprint-bound Easy Setup patch restoration'
     Assert-True -Condition ($settingsGuiSource.Contains("'Credential replacement pending'") -and $settingsGuiSource.Contains("'Credential replacement recovery'") -and $settingsGuiSource.Contains('$state.CredentialReplacementRequired')) -Name 'Interrupted credential replacement is a distinct durable GUI recovery requirement'
-    Assert-True -Condition ($settingsGuiSource.Contains("@('ProviderComboBox', 'ModelComboBox', 'TelegramCheckBox', 'DiscordCheckBox')") -and $settingsGuiSource.Contains("`$controls[`$controlName].IsEnabled = `$false")) -Name 'Receipt-bound provider, model, and channel selections are explicitly locked in recovery mode'
+    Assert-True -Condition ($settingsGuiSource.Contains("@('ProviderComboBox', 'ModelComboBox', 'SlackCheckBox', 'TelegramCheckBox', 'DiscordCheckBox')") -and $settingsGuiSource.Contains("`$controls[`$controlName].IsEnabled = `$false")) -Name 'Receipt-bound provider, model, and channel selections are explicitly locked in recovery mode'
+    Assert-True -Condition ($settingsGuiSource.Contains("`$credentialMap['SlackBotToken']") -and $settingsGuiSource.Contains("`$credentialMap['SlackAppToken']") -and $settingsGuiSource.Contains("`$recoveryCredentialMap['SlackBotToken']") -and $settingsGuiSource.Contains("`$recoveryCredentialMap['SlackAppToken']")) -Name 'Normal apply and full-set recovery pass both Slack SecureStrings without plaintext conversion'
     Assert-True -Condition ($settingsGuiSource.Contains('$process.WaitForExit()') -and $settingsGuiSource.Contains('$state.ExitCode = if ($state.PartialApplied) { 42 } else { 0 }')) -Name 'Advanced setup waits for its real result and cannot erase partial-apply failure state'
 
     $settingsDescribeOutput = (& $hostExecutable -NoLogo -NoProfile -Sta -ExecutionPolicy Bypass -File $settingsGuiEntryPoint -Describe 2>&1 | Out-String).Trim()
@@ -378,9 +386,10 @@ try {
     $settingsSmokeState = Join-Path $testRoot 'settings-smoke-missing-state'
     $settingsSmokeOutput = (& $hostExecutable -NoLogo -NoProfile -Sta -ExecutionPolicy Bypass -File $settingsGuiEntryPoint -SmokeTest -StateDirectory $settingsSmokeState 2>&1 | Out-String).Trim()
     $settingsSmoke = $settingsSmokeOutput | ConvertFrom-Json
-    Assert-True -Condition ($settingsSmoke.Loaded -and $settingsSmoke.ModuleImported -and $settingsSmoke.InteractiveControls -eq 13 -and $settingsSmoke.MissingAccessibleNames -eq 0 -and $settingsSmoke.MissingTabIndexes -eq 0) -Name 'Rendered settings wizard exposes all reviewed accessible controls'
+    Assert-True -Condition ($settingsSmoke.Loaded -and $settingsSmoke.ModuleImported -and $settingsSmoke.InteractiveControls -eq 16 -and $settingsSmoke.MissingAccessibleNames -eq 0 -and $settingsSmoke.MissingTabIndexes -eq 0) -Name 'Rendered settings wizard exposes all reviewed accessible controls'
     Assert-True -Condition ($settingsSmoke.ApprovalDefaultOff -and $settingsSmoke.ApplyDefaultDisabled -and $settingsSmoke.CancelIsDefault) -Name 'Rendered settings wizard preserves default-deny keyboard behavior'
     Assert-True -Condition ($settingsSmoke.PendingSelectionLocked -and $settingsSmoke.PendingSecretReplacementAvailable -and $settingsSmoke.PendingReadOnlyRecheckEnabled -and $settingsSmoke.PendingRestartRequiresApproval) -Name 'Rendered pending recovery locks receipt selections and separates read-only recheck from approved restart/replacement'
+    Assert-True -Condition $settingsSmoke.SlackTokensFollowSelection -Name 'Rendered Slack selection enables both masked token inputs together'
     Assert-True -Condition $settingsSmoke.PendingDriftRestoreAvailable -Name 'Rendered drift recovery exposes explicit approved-patch restoration consent'
     Assert-True -Condition $settingsSmoke.PendingCredentialReplacementRequired -Name 'Rendered interrupted credential replacement requires the complete receipt-bound secret set, including during drift restoration'
     Assert-True -Condition ($settingsSmoke.ExternalApiCalls -eq 0 -and $settingsSmoke.SecretsCleared) -Name 'Settings smoke test makes no external calls and clears secret inputs'

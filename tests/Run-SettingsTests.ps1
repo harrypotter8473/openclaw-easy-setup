@@ -46,6 +46,7 @@ function Get-ThrownException {
 $catalog = Get-OpenClawSafeSetupCatalog
 Assert-Equal -Actual $catalog.Version -Expected '0.4.0' -Name 'Safe setup catalog exposes the 0.4 contract'
 Assert-Equal -Actual @($catalog.Providers).Count -Expected 3 -Name 'Reviewed catalog exposes three API-key providers'
+Assert-Equal -Actual (@($catalog.Channels | ForEach-Object Id) -join '|') -Expected 'slack|telegram|discord' -Name 'Reviewed channel catalog prioritizes Slack before Telegram and Discord'
 Assert-True -Condition (@($catalog.Providers | Where-Object Id -eq 'openai').Count -eq 1) -Name 'OpenAI is a reviewed provider choice'
 Assert-True -Condition ($catalog.SecurityDefaults.GatewayMode -eq 'local' -and $catalog.SecurityDefaults.GatewayBind -eq 'loopback') -Name 'Catalog defaults to a local loopback Gateway'
 Assert-True -Condition ($catalog.SecurityDefaults.ToolProfile -eq 'messaging' -and -not $catalog.SecurityDefaults.ElevatedTools) -Name 'Catalog defaults to messaging-only non-elevated tools'
@@ -56,8 +57,9 @@ $fixtureResolver = Join-Path $fixtureRoot 'State\Resolver\OpenClawEasySetup.Secr
 $schemaHash = 'A' * 64
 $configHash = 'B' * 64
 $runId = '0123456789abcdef0123456789abcdef'
-$plan = New-OpenClawSafeSetupPlan -ProviderId openai -ModelId 'openai/gpt-5.6' -EnableTelegram $true -EnableDiscord $true -RunId $runId -SchemaHash $schemaHash -BaseConfigHash $configHash -ConfigPath $fixtureConfig -ResolverPath $fixtureResolver
+$plan = New-OpenClawSafeSetupPlan -ProviderId openai -ModelId 'openai/gpt-5.6' -EnableSlack $true -EnableTelegram $true -EnableDiscord $true -RunId $runId -SchemaHash $schemaHash -BaseConfigHash $configHash -ConfigPath $fixtureConfig -ResolverPath $fixtureResolver
 
+Assert-Equal -Actual $plan.PlanVersion -Expected 2 -Name 'Slack plans use the version 2 fingerprint contract'
 Assert-Equal -Actual $plan.OpenClawVersion -Expected '2026.7.1' -Name 'Plan binds the reviewed OpenClaw release'
 Assert-True -Condition ($plan.Fingerprint -match '^[A-F0-9]{64}$') -Name 'Plan has a canonical SHA-256 fingerprint'
 Assert-Equal -Actual (Get-OpenClawSafeSetupPlanFingerprint -Plan $plan) -Expected $plan.Fingerprint -Name 'Plan fingerprint is reproducible'
@@ -68,11 +70,14 @@ Assert-True -Condition ($plan.Patch.tools.profile -eq 'messaging' -and -not $pla
 Assert-True -Condition ($plan.Patch.tools.deny -contains 'group:runtime' -and $plan.Patch.tools.deny -contains 'group:fs' -and $plan.Patch.tools.deny -contains 'bundle-mcp') -Name 'Patch explicitly denies command, filesystem, and bundled MCP escape surfaces'
 Assert-Equal -Actual $plan.Patch.session.dmScope -Expected 'per-channel-peer' -Name 'Direct-message sessions are separated per channel peer'
 
-foreach ($channelName in @('telegram', 'discord')) {
+foreach ($channelName in @('slack', 'telegram', 'discord')) {
     $channel = $plan.Patch.channels.$channelName
     Assert-True -Condition ($channel.enabled -and $channel.dmPolicy -eq 'pairing' -and $channel.groupPolicy -eq 'disabled' -and -not $channel.configWrites) -Name "$channelName uses pairing, blocks groups, and cannot rewrite config"
 }
-Assert-True -Condition ($plan.Patch.channels.telegram.botToken.source -eq 'exec' -and $plan.Patch.channels.discord.token.source -eq 'exec') -Name 'Channel bot tokens are Credential Manager SecretRefs'
+Assert-True -Condition ($plan.Patch.channels.slack.botToken.source -eq 'exec' -and $plan.Patch.channels.slack.appToken.source -eq 'exec' -and $plan.Patch.channels.telegram.botToken.source -eq 'exec' -and $plan.Patch.channels.discord.token.source -eq 'exec') -Name 'All selected channel tokens are Credential Manager SecretRefs'
+Assert-True -Condition ($plan.Patch.channels.slack.mode -eq 'socket' -and $plan.Patch.channels.slack.dm.enabled -and -not $plan.Patch.channels.slack.dm.groupEnabled -and $plan.Patch.channels.slack.requireMention) -Name 'Slack uses Socket Mode with pairing DMs and no group DMs'
+Assert-True -Condition (-not $plan.Patch.channels.slack.commands.native -and -not $plan.Patch.channels.slack.commands.nativeSkills -and -not $plan.Patch.channels.slack.slashCommand.enabled -and -not $plan.Patch.channels.slack.dangerouslyAllowNameMatching -and -not $plan.Patch.channels.slack.allowBots -and $plan.Patch.channels.slack.userTokenReadOnly) -Name 'Slack disables mutable commands, name matching, bot messages, and write-capable user tokens'
+Assert-True -Condition ($plan.SlackPlugin.InstallSpec -eq '@openclaw/slack@2026.7.1' -and $plan.SlackPlugin.NpmIntegrity -match '^sha512-' -and $plan.SlackPlugin.NpmShasum -match '^[a-f0-9]{40}$') -Name 'Plan binds the exact official Slack plugin package and npm provenance'
 Assert-True -Condition ($plan.Patch.models.providers.openai.apiKey.source -eq 'exec') -Name 'Model API key is a Credential Manager SecretRef'
 Assert-True -Condition ($plan.Patch.models.mode -eq 'merge' -and $plan.Patch.models.providers.openai.Count -eq 1 -and $plan.Patch.models.providers.openai.Contains('apiKey')) -Name 'Built-in provider uses the pinned key-only overlay contract and forces bundled catalog merge mode'
 
@@ -86,6 +91,7 @@ $expectedReplacePaths = @(
     'agents.defaults.model'
     'models.mode'
     'models.providers.openai'
+    'channels.slack'
     'channels.telegram'
     'channels.discord'
 )
@@ -100,7 +106,7 @@ $dryRunReplacePaths = for ($argumentIndex = 0; $argumentIndex -lt $dryRunPatchAr
 }
 Assert-True -Condition ((@($writeReplacePaths) -join '|') -eq ($expectedReplacePaths -join '|') -and (@($dryRunReplacePaths) -join '|') -eq ($expectedReplacePaths -join '|')) -Name 'Dry-run and write use the identical fingerprint-bound replace-path set'
 
-$expectedCredentialNames = @('GatewayToken', 'ModelApiKey', 'TelegramBotToken', 'DiscordBotToken')
+$expectedCredentialNames = @('GatewayToken', 'ModelApiKey', 'SlackBotToken', 'SlackAppToken', 'TelegramBotToken', 'DiscordBotToken')
 Assert-Equal -Actual @($plan.CredentialIds.PSObject.Properties).Count -Expected $expectedCredentialNames.Count -Name 'Plan creates one credential per secret'
 foreach ($name in $expectedCredentialNames) {
     $id = [string]$plan.CredentialIds.$name
@@ -111,7 +117,7 @@ $canary = 'OCES_CANARY_SECRET_VALUE_1234567890'
 $preview = Get-OpenClawSafeSetupPreview -Plan $plan
 $patchJson = $plan.Patch | ConvertTo-Json -Depth 32
 Assert-True -Condition (-not $preview.Contains($canary) -and -not $patchJson.Contains($canary)) -Name 'Preview and patch contain no plaintext canary secret'
-Assert-True -Condition ($preview.Contains('Windows Credential Manager') -and $preview.Contains($plan.Fingerprint)) -Name 'Preview explains secret storage and binds the plan fingerprint'
+Assert-True -Condition ($preview.Contains('Windows Credential Manager') -and $preview.Contains($plan.Fingerprint) -and $preview.Contains('@openclaw/slack@2026.7.1')) -Name 'Preview explains secret storage, exact Slack plugin provenance, and the plan fingerprint'
 try {
     [void]($patchJson | ConvertFrom-Json)
     $patchParses = $true
@@ -127,11 +133,17 @@ Assert-True -Condition (-not $previewWithUntrustedProperty.Contains($canary) -an
 $noChannelPlan = New-OpenClawSafeSetupPlan -ProviderId anthropic -ModelId 'anthropic/claude-opus-4-8' -RunId ('1' * 32) -SchemaHash $schemaHash -BaseConfigHash $configHash -ConfigPath $fixtureConfig -ResolverPath $fixtureResolver
 Assert-True -Condition ($null -eq $noChannelPlan.Patch.PSObject.Properties['channels']) -Name 'Unselected channels are left unchanged instead of being deleted'
 Assert-Equal -Actual @($noChannelPlan.CredentialIds.PSObject.Properties).Count -Expected 2 -Name 'No-channel plan stores only Gateway and model credentials'
+$slackOnlyPlan = New-OpenClawSafeSetupPlan -ProviderId anthropic -ModelId 'anthropic/claude-opus-4-8' -EnableSlack $true -RunId ('5' * 32) -SchemaHash $schemaHash -BaseConfigHash $configHash -ConfigPath $fixtureConfig -ResolverPath $fixtureResolver
+Assert-True -Condition ($slackOnlyPlan.Patch.channels.Count -eq 1 -and $slackOnlyPlan.Patch.channels.Contains('slack') -and @($slackOnlyPlan.CredentialIds.PSObject.Properties).Count -eq 4) -Name 'Slack-only setup changes only Slack and stores its exact two tokens'
 
 $badModel = Get-ThrownException { New-OpenClawSafeSetupPlan -ProviderId openai -ModelId 'openai/not-reviewed' -RunId ('2' * 32) -SchemaHash $schemaHash -BaseConfigHash $configHash -ConfigPath $fixtureConfig -ResolverPath $fixtureResolver }
 Assert-True -Condition ($null -ne $badModel) -Name 'Unreviewed model ids are rejected before a plan is created'
 $partialState = Get-ThrownException { New-OpenClawSafeSetupPlan -ProviderId openai -ModelId 'openai/gpt-5.6' -RunId ('3' * 32) -SchemaHash $schemaHash }
 Assert-True -Condition ($null -ne $partialState) -Name 'Partial injected live state is rejected'
+$legacyVersionPlan = $plan | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$legacyVersionPlan.PlanVersion = 1
+$legacyVersionPlanRejected = Get-ThrownException { Get-OpenClawSafeSetupPreview -Plan $legacyVersionPlan }
+Assert-True -Condition ($null -ne $legacyVersionPlanRejected) -Name 'Schema v1 plans cannot enter the version 2 preview or apply contract'
 
 $mutatedPlan = New-OpenClawSafeSetupPlan -ProviderId google -ModelId 'google/gemini-3.1-pro-preview' -RunId ('4' * 32) -SchemaHash $schemaHash -BaseConfigHash $configHash -ConfigPath $fixtureConfig -ResolverPath $fixtureResolver
 $originalFingerprint = $mutatedPlan.Fingerprint
@@ -154,6 +166,11 @@ Assert-True -Condition ($resolverSource -match 'protocolVersion' -and $resolverS
 $settingsSource = Get-Content -LiteralPath $settingsModulePath -Raw -Encoding UTF8
 Assert-True -Condition ($settingsSource -notmatch 'StandardInputEncoding' -and $settingsSource.Contains('StandardInput.BaseStream.Write')) -Name 'OpenClaw JSON stdin uses the Windows PowerShell 5.1-compatible UTF-8 byte stream'
 Assert-True -Condition (([regex]::Matches($settingsSource, 'Resolve-OpenClawInvocation')).Count -eq 1 -and $settingsSource.Contains('SettingsInvocationCache')) -Name 'Settings workflow resolves full package provenance only through its stamped invocation cache'
+$slackPluginCheckIndex = $settingsSource.IndexOf('function Invoke-OpenClawSafeSetupSlackPluginCheck', [StringComparison]::Ordinal)
+$slackProvenanceInspectIndex = $settingsSource.IndexOf("-Arguments @('plugins', 'inspect', 'slack', '--json')", $slackPluginCheckIndex, [StringComparison]::Ordinal)
+$slackProvenanceGateIndex = $settingsSource.IndexOf('Assert-OpenClawSlackPluginProvenance', $slackProvenanceInspectIndex, [StringComparison]::Ordinal)
+$slackRuntimeInspectIndex = $settingsSource.IndexOf("-Arguments @('plugins', 'inspect', 'slack', '--runtime', '--json')", $slackProvenanceGateIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($slackPluginCheckIndex -ge 0 -and $slackProvenanceInspectIndex -gt $slackPluginCheckIndex -and $slackProvenanceGateIndex -gt $slackProvenanceInspectIndex -and $slackRuntimeInspectIndex -gt $slackProvenanceGateIndex) -Name 'Settings verifies exact Slack provenance without runtime loading before any runtime inspection'
 $secretRefreshCount = ([regex]::Matches($settingsSource, 'Invoke-OpenClawSafeSetupDryRun[^\r\n]*-AllowExec[^\r\n]*-ForceInvocationRefresh')).Count
 $patchRefreshCount = ([regex]::Matches($settingsSource, "config', 'patch', '--stdin'[^\r\n]*ForceInvocationRefresh")).Count
 Assert-True -Condition ($secretRefreshCount -eq 2 -and $patchRefreshCount -eq 0) -Name 'Apply and approved drift recovery refresh provenance at their secret-bearing exec boundary and reuse the stamped invocation for patching'
@@ -166,7 +183,7 @@ Assert-True -Condition ($completeExecAccepted -and -not $incompleteExecAccepted)
 $recoverySecrets = New-Object 'System.Collections.Generic.List[System.Security.SecureString]'
 try {
     $recoveryCredentialMap = @{}
-    foreach ($credentialName in @('ModelApiKey', 'TelegramBotToken', 'DiscordBotToken')) {
+    foreach ($credentialName in @('ModelApiKey', 'SlackBotToken', 'SlackAppToken', 'TelegramBotToken', 'DiscordBotToken')) {
         $secureFixture = New-Object Security.SecureString
         foreach ($character in ('fixture-' + $credentialName).ToCharArray()) { $secureFixture.AppendChar($character) }
         $secureFixture.MakeReadOnly()
@@ -239,19 +256,24 @@ $pathDriftRecoveryCompatibility = & $settingsModule { param($PlanValue, $LiveVal
 Assert-True -Condition ($matchingRecoveryCompatibility -and -not $schemaDriftRecoveryCompatibility -and -not $versionDriftRecoveryCompatibility -and -not $pathDriftRecoveryCompatibility) -Name 'Recovery compatibility requires the exact pending version, schema, and active config path without rebasing'
 
 $passingGatewayPreflight = @(
+    [pscustomobject]@{ Name = 'Slack plugin inspection'; Passed = $true }
     [pscustomobject]@{ Name = 'Approved patch continuity'; Passed = $true }
     [pscustomobject]@{ Name = 'Config validation'; Passed = $true }
     [pscustomobject]@{ Name = 'Safe configuration invariants'; Passed = $true }
 )
 $failingGatewayPreflight = @(
+    [pscustomobject]@{ Name = 'Slack plugin inspection'; Passed = $false }
     [pscustomobject]@{ Name = 'Approved patch continuity'; Passed = $true }
-    [pscustomobject]@{ Name = 'Config validation'; Passed = $false }
+    [pscustomobject]@{ Name = 'Config validation'; Passed = $true }
     [pscustomobject]@{ Name = 'Safe configuration invariants'; Passed = $true }
 )
-$passingGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue } $passingGatewayPreflight
-$failingGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue } $failingGatewayPreflight
-$incompleteGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue } @($passingGatewayPreflight | Select-Object -First 2)
-Assert-True -Condition ($passingGatewayGate -and -not $failingGatewayGate -and -not $incompleteGatewayGate) -Name 'Gateway mutation gate requires all three exact configuration preflight checks to pass'
+$configurationOnlyPreflight = @($passingGatewayPreflight | Select-Object -Skip 1)
+$passingGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue -RequireSlack } $passingGatewayPreflight
+$failingGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue -RequireSlack } $failingGatewayPreflight
+$incompleteGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue -RequireSlack } @($passingGatewayPreflight | Select-Object -First 3)
+$missingSlackGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue -RequireSlack } $configurationOnlyPreflight
+$nonSlackGatewayGate = & $settingsModule { param($ChecksValue) Test-OpenClawSafeSetupGatewayPreflightChecks -Checks $ChecksValue } $configurationOnlyPreflight
+Assert-True -Condition ($passingGatewayGate -and -not $failingGatewayGate -and -not $incompleteGatewayGate -and -not $missingSlackGatewayGate -and $nonSlackGatewayGate) -Name 'Gateway mutation gate explicitly requires exact Slack provenance for Slack plans plus every configuration preflight'
 
 Assert-True -Condition ($settingsSource.Contains('Configuration drift recovery authorization') -and $settingsSource.Contains('[switch]$AcceptConfigChange')) -Name 'Recovery fails closed on config fingerprint drift unless patch restoration is explicitly authorized'
 Assert-True -Condition ($settingsSource.Contains('-EnsureGatewayService:$restartGateway')) -Name 'Recovery restarts the Gateway only for an explicitly approved mutation path'
@@ -266,7 +288,7 @@ Assert-True -Condition ($replacementMarkerIndex -ge 0 -and $replacementWriteInde
 $postChecksIndex = $settingsSource.IndexOf('function Invoke-OpenClawSafeSetupPostChecks', [StringComparison]::Ordinal)
 $gatewayGateIndex = $settingsSource.IndexOf('if (Test-OpenClawSafeSetupGatewayPreflightChecks', $postChecksIndex, [StringComparison]::Ordinal)
 $gatewayInstallIndex = $settingsSource.IndexOf("-Name 'Gateway service install'", $postChecksIndex, [StringComparison]::Ordinal)
-Assert-True -Condition ($postChecksIndex -ge 0 -and $gatewayGateIndex -gt $postChecksIndex -and $gatewayInstallIndex -gt $gatewayGateIndex -and $settingsSource.Contains('failed before Gateway mutation')) -Name 'Post-checks skip Gateway install and restart when any configuration preflight fails'
+Assert-True -Condition ($postChecksIndex -ge 0 -and $gatewayGateIndex -gt $postChecksIndex -and $gatewayInstallIndex -gt $gatewayGateIndex -and $settingsSource.Contains('-RequireSlack:([bool]$Plan.EnableSlack)') -and $settingsSource.Contains('failed before Gateway mutation')) -Name 'Post-checks bind Slack selection into the preflight gate and skip Gateway mutation on any failure'
 $recoveryFunctionIndex = $settingsSource.IndexOf('function Invoke-OpenClawSafeSetupRecoveryVerification', [StringComparison]::Ordinal)
 $recoveryCompatibilityIndex = $settingsSource.IndexOf('$compatibilityLiveState = Get-OpenClawSafeSetupRecoveryCompatibilityState', $recoveryFunctionIndex, [StringComparison]::Ordinal)
 $recoveryCleanupIndex = $settingsSource.IndexOf('Remove-OpenClawCredential -Id', $recoveryFunctionIndex, [StringComparison]::Ordinal)
@@ -304,7 +326,8 @@ Assert-True -Condition ($temporaryAclHardenIndex -gt $receiptWriterIndex -and $t
 $lockFreshnessIndex = $settingsSource.IndexOf("`$pendingRecovery = Get-OpenClawSafeSetupPendingRecovery", [StringComparison]::Ordinal)
 $lockedFreshnessIndex = $settingsSource.IndexOf('Assert-OpenClawSafeSetupPlanFresh -Plan $Plan', $lockFreshnessIndex, [StringComparison]::Ordinal)
 $resolverInstallIndex = $settingsSource.IndexOf('Install-OpenClawCredentialResolver', $lockFreshnessIndex, [StringComparison]::Ordinal)
-Assert-True -Condition ($lockFreshnessIndex -ge 0 -and $lockedFreshnessIndex -gt $lockFreshnessIndex -and $lockedFreshnessIndex -lt $resolverInstallIndex) -Name 'Apply rechecks freshness under the transaction lock before writing resolver, receipt, or credentials'
+$lockedSlackPluginIndex = $settingsSource.IndexOf('Assert-OpenClawSafeSetupSlackPluginReady', $lockedFreshnessIndex, [StringComparison]::Ordinal)
+Assert-True -Condition ($lockFreshnessIndex -ge 0 -and $lockedFreshnessIndex -gt $lockFreshnessIndex -and $lockedFreshnessIndex -lt $lockedSlackPluginIndex -and $lockedSlackPluginIndex -lt $resolverInstallIndex) -Name 'Apply rechecks freshness and exact Slack plugin provenance under the transaction lock before writing resolver, receipt, or credentials'
 Assert-True -Condition ($settingsSource.Contains("-Status Partial -AppliedConfigHash ''")) -Name 'Ambiguous Preparing recovery never silently trusts an observed changed config hash'
 
 $healthySecurity = [pscustomobject]@{
@@ -385,6 +408,52 @@ $disconnectedDiscordChannel = [pscustomobject]@{
         })
     }
 }
+$healthySlackChannel = [pscustomobject]@{
+    channelAccounts = [pscustomobject]@{
+        slack = @([pscustomobject]@{
+            accountId = 'default'
+            enabled = $true
+            configured = $true
+            running = $true
+            connected = $true
+            healthState = 'healthy'
+            botTokenStatus = 'available'
+            appTokenStatus = 'available'
+            lastError = $null
+            probe = [pscustomobject]@{ ok = $true; status = 200 }
+        })
+    }
+}
+$disconnectedSlackChannel = [pscustomobject]@{
+    channelAccounts = [pscustomobject]@{
+        slack = @([pscustomobject]@{
+            accountId = 'default'
+            enabled = $true
+            configured = $true
+            running = $true
+            connected = $false
+            healthState = 'unhealthy'
+            botTokenStatus = 'available'
+            appTokenStatus = 'available'
+            probe = [pscustomobject]@{ ok = $true; status = 200 }
+        })
+    }
+}
+$missingSlackAppToken = [pscustomobject]@{
+    channelAccounts = [pscustomobject]@{
+        slack = @([pscustomobject]@{
+            accountId = 'default'
+            enabled = $true
+            configured = $true
+            running = $true
+            connected = $true
+            healthState = 'healthy'
+            botTokenStatus = 'available'
+            appTokenStatus = 'missing'
+            probe = [pscustomobject]@{ ok = $true; status = 200 }
+        })
+    }
+}
 $partialChannel = [pscustomobject]@{
     partial = $true
     channelAccounts = $healthyChannel.channelAccounts
@@ -394,10 +463,16 @@ $failedChannelAccepted = & $settingsModule { param($Value) Test-OpenClawChannelS
 $configOnlyChannelAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId telegram } $configOnlyChannel
 $stoppedTelegramAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId telegram } $stoppedTelegramChannel
 $disconnectedDiscordAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId discord } $disconnectedDiscordChannel
+$healthySlackAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId slack } $healthySlackChannel
+$disconnectedSlackAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId slack } $disconnectedSlackChannel
+$missingSlackAppTokenAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId slack } $missingSlackAppToken
+$missingSlackAppTokenDetail = & $settingsModule { param($Value) Get-OpenClawSafeSetupSemanticFailureDetail -Kind Channel -Value $Value -ChannelId slack } $missingSlackAppToken
 $partialChannelAccepted = & $settingsModule { param($Value) Test-OpenClawChannelStatusJson -Value $Value -ChannelId telegram } $partialChannel
 Assert-True -Condition $healthyChannelAccepted -Name 'Semantic channel check accepts a running configured account with a successful probe'
 Assert-True -Condition (-not $failedChannelAccepted -and -not $configOnlyChannelAccepted) -Name 'Semantic channel check rejects failed probes and config-only fallback output'
 Assert-True -Condition (-not $stoppedTelegramAccepted -and -not $disconnectedDiscordAccepted -and -not $partialChannelAccepted) -Name 'Semantic channel check rejects stopped, disconnected, and partial status output'
+Assert-True -Condition ($healthySlackAccepted -and -not $disconnectedSlackAccepted -and -not $missingSlackAppTokenAccepted) -Name 'Slack status requires a live Socket connection plus both available token SecretRefs, not only a successful bot probe'
+Assert-True -Condition ($missingSlackAppTokenDetail.Contains('botCredentialState=available') -and $missingSlackAppTokenDetail.Contains('appCredentialState=missing')) -Name 'Slack status failure explains credential availability without exposing either token value'
 
 $whatIfRecoveryRoot = Join-Path $PSScriptRoot ('.tmp-settings-whatif-' + [Guid]::NewGuid().ToString('N'))
 $whatIfRecovery = Invoke-OpenClawSafeSetupRecoveryVerification -StateDirectory $whatIfRecoveryRoot -WhatIf
@@ -457,10 +532,10 @@ try {
         Write-OpenClawSafeSetupRecoveryReceipt -Plan $PlanValue -Checks $ChecksValue -CredentialIds $IdsValue -Status Partial -AppliedConfigHash ('C' * 64) -StateDirectory $RootValue
     } $plan $receiptChecks $receiptIds $receiptRoot)
     $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-True -Condition ($receipt.status -eq 'Partial' -and $receipt.planFingerprint -eq $plan.Fingerprint -and @($receipt.credentialIds).Count -eq 4) -Name 'Private recovery receipt preserves the plan fingerprint and exact credential ids'
+    Assert-True -Condition ($receipt.schemaVersion -eq 2 -and $receipt.planVersion -eq 2 -and $receipt.status -eq 'Partial' -and $receipt.planFingerprint -eq $plan.Fingerprint -and $receipt.enableSlack -eq $true -and $receipt.slackPlugin.installSpec -eq '@openclaw/slack@2026.7.1' -and @($receipt.credentialIds).Count -eq 6) -Name 'Version 2 recovery receipt preserves Slack selection, plugin provenance, plan fingerprint, and exact credential ids'
     Assert-True -Condition (-not (Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8).Contains('OCES_RECEIPT_SECRET_CANARY')) -Name 'Recovery receipt sanitizes diagnostic details before persistence'
     $pendingReceipt = Get-OpenClawSafeSetupPendingRecovery -StateDirectory $receiptRoot
-    Assert-True -Condition ($pendingReceipt.Status -eq 'Partial' -and $pendingReceipt.Plan.Fingerprint -eq $plan.Fingerprint -and @($pendingReceipt.CredentialIds).Count -eq 4) -Name 'Recovery reader validates and reconstructs a pending approved plan'
+    Assert-True -Condition ($pendingReceipt.Status -eq 'Partial' -and $pendingReceipt.Plan.Fingerprint -eq $plan.Fingerprint -and $pendingReceipt.Plan.EnableSlack -and $pendingReceipt.Plan.SlackPlugin.InstallSpec -eq '@openclaw/slack@2026.7.1' -and @($pendingReceipt.CredentialIds).Count -eq 6) -Name 'Recovery reader validates and reconstructs the pending Slack-bound approved plan'
     [void](& $settingsModule {
         param($PlanValue, $ChecksValue, $IdsValue, $RootValue)
         Write-OpenClawSafeSetupRecoveryReceipt -Plan $PlanValue -Checks $ChecksValue -CredentialIds $IdsValue -Status Partial -AppliedConfigHash ('C' * 64) -StateDirectory $RootValue
@@ -488,6 +563,117 @@ try {
         param($PlanValue, $IdsValue, $RootValue)
         Write-OpenClawSafeSetupRecoveryReceipt -Plan $PlanValue -Checks @([pscustomobject]@{ Name = 'Test cleanup'; Passed = $true; ExitCode = 0; Detail = '' }) -CredentialIds $IdsValue -Status Succeeded -AppliedConfigHash ('E' * 64) -StateDirectory $RootValue
     } $driftPlan $driftIds $receiptRoot)
+
+    $legacyFingerprint = & $settingsModule {
+        param($PlanValue)
+        Get-OpenClawSafeSetupLegacyPlanFingerprint -Plan $PlanValue
+    } $driftPlan
+    $legacyIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $legacyUserSid = $legacyIdentity.User.Value
+    }
+    finally {
+        $legacyIdentity.Dispose()
+    }
+    $legacyNow = [DateTime]::UtcNow.ToString('o')
+    $legacyReceipt = [ordered]@{
+        schemaVersion = 1
+        toolVersion = '0.4.0'
+        userSid = $legacyUserSid
+        createdAtUtc = $legacyNow
+        updatedAtUtc = $legacyNow
+        status = 'Succeeded'
+        planFingerprint = $legacyFingerprint
+        openClawVersion = [string]$driftPlan.OpenClawVersion
+        schemaHash = [string]$driftPlan.SchemaHash
+        configPath = [string]$driftPlan.ConfigPath
+        resolverPath = [string]$driftPlan.ResolverPath
+        providerId = [string]$driftPlan.ProviderId
+        modelId = [string]$driftPlan.ModelId
+        enableTelegram = [bool]$driftPlan.EnableTelegram
+        enableDiscord = [bool]$driftPlan.EnableDiscord
+        baseConfigHash = [string]$driftPlan.BaseConfigHash
+        appliedConfigHash = ('E' * 64)
+        credentialIds = @($driftIds)
+        credentialIdsByName = $driftPlan.CredentialIds
+        replacePaths = @($driftPlan.ReplacePaths)
+        patch = $driftPlan.Patch
+        checks = @()
+    }
+    $legacyStatePath = Join-Path $receiptRoot 'State'
+    $legacyPath = Join-Path $legacyStatePath ("settings-{0}.json" -f $legacyFingerprint)
+    $legacyJson = & $settingsModule { param($Value) ConvertTo-OpenClawSettingsJson -Value $Value } $legacyReceipt
+    [IO.File]::WriteAllText($legacyPath, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+    & $settingsModule {
+        param($PathValue)
+        Set-OpenClawSafeSetupReceiptAcl -Path $PathValue
+        Assert-OpenClawSafeSetupReceiptAcl -Path $PathValue
+    } $legacyPath
+    Assert-True -Condition ($null -eq (Get-OpenClawSafeSetupPendingRecovery -StateDirectory $receiptRoot)) -Name 'Validated terminal schema v1 receipts do not block the version 2 settings workflow'
+
+    $legacyReceipt.status = 'RolledBack'
+    $legacyReceipt.updatedAtUtc = [DateTime]::UtcNow.AddMilliseconds(100).ToString('o')
+    $legacyJson = & $settingsModule { param($Value) ConvertTo-OpenClawSettingsJson -Value $Value } $legacyReceipt
+    [IO.File]::WriteAllText($legacyPath, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+    & $settingsModule { param($PathValue) Set-OpenClawSafeSetupReceiptAcl -Path $PathValue } $legacyPath
+    Assert-True -Condition ($null -eq (Get-OpenClawSafeSetupPendingRecovery -StateDirectory $receiptRoot)) -Name 'Validated rolled-back schema v1 receipts also remain terminal during upgrade'
+
+    $legacyReceipt.status = 'Succeeded'
+    $legacyReceipt['planVersion'] = 2
+    $legacyJson = & $settingsModule { param($Value) ConvertTo-OpenClawSettingsJson -Value $Value } $legacyReceipt
+    [IO.File]::WriteAllText($legacyPath, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+    & $settingsModule { param($PathValue) Set-OpenClawSafeSetupReceiptAcl -Path $PathValue } $legacyPath
+    $hybridLegacyBlocked = $false
+    try {
+        [void](Get-OpenClawSafeSetupPendingRecovery -StateDirectory $receiptRoot)
+    }
+    catch {
+        $hybridLegacyBlocked = [string]$_.Exception.Message -eq 'A legacy recovery receipt contained fields from a different schema.'
+    }
+    Assert-True -Condition $hybridLegacyBlocked -Name 'Hybrid schema v1 receipts containing a plan version or Slack fields are rejected'
+    [void]$legacyReceipt.Remove('planVersion')
+
+    $legacyReceipt.patch.gateway.mode = 'remote'
+    $legacyJson = & $settingsModule { param($Value) ConvertTo-OpenClawSettingsJson -Value $Value } $legacyReceipt
+    [IO.File]::WriteAllText($legacyPath, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+    & $settingsModule { param($PathValue) Set-OpenClawSafeSetupReceiptAcl -Path $PathValue } $legacyPath
+    $tamperedLegacyTerminalBlocked = $false
+    try {
+        [void](Get-OpenClawSafeSetupPendingRecovery -StateDirectory $receiptRoot)
+    }
+    catch {
+        $tamperedLegacyTerminalBlocked = [string]$_.Exception.Message -eq 'A legacy recovery receipt plan fingerprint was invalid.'
+    }
+    Assert-True -Condition $tamperedLegacyTerminalBlocked -Name 'Tampered terminal schema v1 receipts fail closed instead of being silently skipped'
+    $legacyReceipt.patch.gateway.mode = 'local'
+
+    $legacyPendingCanary = 'LEGACY_PENDING_DETAIL_CANARY'
+    $legacyReceipt.checks = @([ordered]@{ name = 'Legacy pending'; passed = $false; exitCode = -1; detail = $legacyPendingCanary })
+    $allLegacyPendingBlocked = $true
+    foreach ($legacyPendingStatus in @('Preparing', 'AppliedPendingChecks', 'Partial')) {
+        $legacyReceipt.status = $legacyPendingStatus
+        $legacyReceipt.updatedAtUtc = [DateTime]::UtcNow.AddSeconds(1).ToString('o')
+        $legacyJson = & $settingsModule { param($Value) ConvertTo-OpenClawSettingsJson -Value $Value } $legacyReceipt
+        [IO.File]::WriteAllText($legacyPath, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+        & $settingsModule { param($PathValue) Set-OpenClawSafeSetupReceiptAcl -Path $PathValue } $legacyPath
+        $legacyPendingMessage = ''
+        try {
+            [void](Get-OpenClawSafeSetupPendingRecovery -StateDirectory $receiptRoot)
+            $allLegacyPendingBlocked = $false
+        }
+        catch {
+            $legacyPendingMessage = [string]$_.Exception.Message
+            if (-not $legacyPendingMessage.Contains('schema v1') -or
+                -not $legacyPendingMessage.Contains('No changes were made') -or
+                $legacyPendingMessage.Contains($driftIds[0]) -or
+                $legacyPendingMessage.Contains($legacyPendingCanary) -or
+                $legacyPendingMessage.Contains($legacyPath)) {
+                $allLegacyPendingBlocked = $false
+            }
+        }
+    }
+    Assert-True -Condition $allLegacyPendingBlocked -Name 'Every pending schema v1 status fails closed with fixed secret-free no-mutation guidance'
+    [IO.File]::Delete($legacyPath)
 
     $cacheExecutable = Join-Path $receiptRoot 'cache-node.exe'
     $cacheEntryPoint = Join-Path $receiptRoot 'cache-openclaw.mjs'

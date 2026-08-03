@@ -72,6 +72,8 @@ $purposes = @(
     'models/openai/api-key',
     'models/anthropic/api-key',
     'models/google/api-key',
+    'channels/slack/bot-token',
+    'channels/slack/app-token',
     'channels/telegram/bot-token',
     'channels/discord/bot-token'
 )
@@ -136,6 +138,20 @@ try {
     $missingError = $response.errors.PSObject.Properties[$missingId]
     Assert-True -Condition ($result.ExitCode -eq 0 -and [string]::IsNullOrEmpty($result.Stderr) -and $response.protocolVersion -eq 1) -Name 'Resolver accepts the exact OpenClaw protocol v1 shape'
     Assert-True -Condition (@($response.values.PSObject.Properties).Count -eq 0 -and $missingError.Value.message -eq 'not found') -Name 'Unknown allowlisted ids return a secret-free not-found result'
+
+    $slackMissingIds = @(
+        New-OpenClawCredentialId -Purpose 'channels/slack/bot-token'
+        New-OpenClawCredentialId -Purpose 'channels/slack/app-token'
+    )
+    $slackRequest = [pscustomobject]@{ protocolVersion = 1; provider = 'oces_wincred'; ids = $slackMissingIds } | ConvertTo-Json -Compress
+    $slackResult = Invoke-TestResolver -Path $installation.Path -InputText $slackRequest
+    $slackResponse = $slackResult.Stdout | ConvertFrom-Json
+    $slackErrors = @($slackMissingIds | ForEach-Object { $slackResponse.errors.PSObject.Properties[$_].Value.message })
+    Assert-True -Condition ($slackResult.ExitCode -eq 0 -and
+        [string]::IsNullOrEmpty($slackResult.Stderr) -and
+        @($slackResponse.values.PSObject.Properties).Count -eq 0 -and
+        $slackErrors.Count -eq 2 -and
+        @($slackErrors | Where-Object { $_ -eq 'not found' }).Count -eq 2) -Name 'Compiled resolver accepts both Slack credential ids and returns only secret-free not-found results'
 
     $invalidRequest = '{"protocolVersion":1,"provider":"oces_wincred","ids":["../../arbitrary-target"]}'
     $invalidResult = Invoke-TestResolver -Path $installation.Path -InputText $invalidRequest

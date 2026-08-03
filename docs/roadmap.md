@@ -42,7 +42,8 @@
 - [x] 로컬 loopback Gateway와 자동 생성 256-bit 인증 토큰
 - [x] OpenAI·Anthropic·Google 모델 제공자 및 검토된 모델 선택
 - [x] Windows Credential Manager와 네이티브 exec resolver를 통한 SecretRef 저장
-- [x] Telegram·Discord 채널별 PasswordBox 입력과 안전한 선택형 마법사
+- [x] Slack 우선, Telegram·Discord 채널별 PasswordBox 입력과 안전한 선택형 마법사
+- [x] 공식 Slack 플러그인의 본체 동버전·npm 무결성 고정 설치와 runtime 출처 검증
 - [x] DM 페어링, 그룹 차단, 채널 설정 쓰기 차단 기본값
 - [x] messaging 프로필과 고위험 도구·elevated 명시적 차단
 - [x] 비밀값이 제거된 설정 차이 미리보기와 기본 거부 적용 승인
@@ -52,6 +53,7 @@
 
 - [ ] 코드 서명된 `.exe` 또는 MSIX
 - [ ] SBOM과 재현 가능한 빌드 정보
+- [ ] 외부 플러그인 압축 해제 파일의 독립 콘텐츠 트리 영수증과 재검증
 - [ ] 서명·해시 검증을 포함한 자동 업데이트
 - [ ] Windows 10/11 설치·업데이트·삭제 테스트 매트릭스
 - [ ] 실제 데스크톱에서 키보드 전용, NVDA, 고대비, 200% DPI 접근성 검증

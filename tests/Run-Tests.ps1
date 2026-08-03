@@ -69,6 +69,7 @@ Assert-True -Condition ($recommendedNode26.Supported -and $recommendedNode26.Rec
 
 $config = Get-OpenClawSourceConfig
 Assert-Equal -Actual $config.schemaVersion -Expected 1 -Name 'Source configuration schema is supported'
+Assert-Equal -Actual $config.reviewedOn -Expected '2026-08-03' -Name 'Reviewed source metadata records the current security review date'
 $recoveryToolVersion = & $openClawModule { $script:RecoveryToolVersion }
 Assert-Equal -Actual $recoveryToolVersion -Expected '0.4.0' -Name 'Recovery and checkpoint metadata uses the current tool version'
 $officialUri = [uri]$config.installer.uri
@@ -86,6 +87,90 @@ Assert-True -Condition ([string]$config.node.winget.installerSha256 -match '^[A-
 Assert-Equal -Actual $config.git.winget.id -Expected 'Git.Git' -Name 'Git for Windows uses the exact WinGet package ID'
 Assert-Equal -Actual $config.git.winget.version -Expected '2.55.0.3' -Name 'Git for Windows package is version-pinned'
 Assert-True -Condition ([string]$config.git.winget.installerSha256 -match '^[A-Fa-f0-9]{64}$') -Name 'Git for Windows installer hash is recorded'
+Assert-Equal -Actual $config.slackPlugin.id -Expected 'slack' -Name 'Official Slack plugin uses the reviewed plugin id'
+Assert-Equal -Actual $config.slackPlugin.package -Expected '@openclaw/slack' -Name 'Official Slack plugin uses the reviewed npm package'
+Assert-Equal -Actual $config.slackPlugin.version -Expected $config.openClaw.version -Name 'Slack plugin version matches the pinned OpenClaw host'
+Assert-Equal -Actual $config.slackPlugin.installSpec -Expected '@openclaw/slack@2026.7.1' -Name 'Slack plugin install spec is exact'
+Assert-Equal -Actual $config.slackPlugin.npmIntegrity -Expected 'sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA==' -Name 'Slack plugin npm integrity is pinned'
+Assert-Equal -Actual $config.slackPlugin.npmShasum -Expected '942d747f74faa4c864a7b360e95f0f1dd0329a14' -Name 'Slack plugin npm shasum is pinned'
+
+$syntheticSlackPluginRoot = Join-Path $projectRoot '.synthetic-slack-plugin'
+$validSlackInspection = [pscustomobject]@{
+    plugin = [pscustomobject]@{
+        id = 'slack'
+        name = 'Slack'
+        packageName = '@openclaw/slack'
+        version = '2026.7.1'
+        origin = 'global'
+        enabled = $true
+        status = 'loaded'
+        error = $null
+        failurePhase = $null
+        channelIds = @('slack')
+        rootDir = $syntheticSlackPluginRoot
+        source = Join-Path $syntheticSlackPluginRoot 'index.js'
+    }
+    capabilities = @([pscustomobject]@{ kind = 'channel'; ids = @('slack') })
+    diagnostics = @()
+    compatibility = @()
+    install = [pscustomobject]@{
+        source = 'npm'
+        spec = '@openclaw/slack@2026.7.1'
+        version = '2026.7.1'
+        resolvedName = '@openclaw/slack'
+        resolvedVersion = '2026.7.1'
+        resolvedSpec = '@openclaw/slack@2026.7.1'
+        integrity = 'sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA=='
+        shasum = '942d747f74faa4c864a7b360e95f0f1dd0329a14'
+        installPath = $syntheticSlackPluginRoot
+    }
+}
+$snapshotSlackInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$snapshotSlackInspection.PSObject.Properties.Remove('capabilities')
+$validatedSlackProvenance = Assert-OpenClawSlackPluginProvenance -Inspection $snapshotSlackInspection -SourceConfig $config
+Assert-True -Condition $validatedSlackProvenance.Ready -Name 'Non-runtime Slack snapshot provenance is accepted without loading capabilities'
+Assert-Equal -Actual $validatedSlackProvenance.InstallSpec -Expected $config.slackPlugin.installSpec -Name 'Snapshot provenance validator returns the reviewed install spec'
+
+$validatedSlackInspection = Assert-OpenClawSlackPluginInspection -Inspection $validSlackInspection -SourceConfig $config
+Assert-True -Condition $validatedSlackInspection.Ready -Name 'Exact official Slack plugin inspection is accepted'
+Assert-Equal -Actual $validatedSlackInspection.InstallSpec -Expected $config.slackPlugin.installSpec -Name 'Slack plugin validator returns the reviewed install spec'
+
+$tamperedSlackInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$tamperedSlackInspection.install.integrity = 'sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='
+Assert-True -Condition ($null -ne (Get-ThrownException {
+    Assert-OpenClawSlackPluginProvenance -Inspection $tamperedSlackInspection -SourceConfig $config
+})) -Name 'Snapshot provenance validator rejects npm integrity drift'
+$npmPackOnlySlackInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$npmPackOnlySlackInspection.install.PSObject.Properties.Remove('integrity')
+$npmPackOnlySlackInspection.install.PSObject.Properties.Remove('shasum')
+$npmPackOnlySlackInspection.install | Add-Member -NotePropertyName npmIntegrity -NotePropertyValue ([string]$config.slackPlugin.npmIntegrity)
+$npmPackOnlySlackInspection.install | Add-Member -NotePropertyName npmShasum -NotePropertyValue ([string]$config.slackPlugin.npmShasum)
+Assert-True -Condition ($null -ne (Get-ThrownException {
+    Assert-OpenClawSlackPluginProvenance -Inspection $npmPackOnlySlackInspection -SourceConfig $config
+})) -Name 'Snapshot provenance does not confuse npm-pack artifact fields with the pinned registry install record'
+$shadowedSlackInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$shadowedSlackInspection.plugin.rootDir = Join-Path $projectRoot '.synthetic-shadowed-slack-plugin'
+Assert-True -Condition ($null -ne (Get-ThrownException {
+    Assert-OpenClawSlackPluginProvenance -Inspection $shadowedSlackInspection -SourceConfig $config
+})) -Name 'Snapshot provenance validator rejects a shadowing active source'
+$disabledSlackInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$disabledSlackInspection.plugin.enabled = $false
+Assert-True -Condition ($null -ne (Get-ThrownException {
+    Assert-OpenClawSlackPluginInspection -Inspection $disabledSlackInspection -SourceConfig $config
+})) -Name 'Slack plugin validator rejects a disabled plugin'
+$incompatibleSlackInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$incompatibleSlackInspection.compatibility = @([pscustomobject]@{ severity = 'warn'; code = 'synthetic-incompatible' })
+Assert-True -Condition ($null -ne (Get-ThrownException {
+    Assert-OpenClawSlackPluginInspection -Inspection $incompatibleSlackInspection -SourceConfig $config
+})) -Name 'Slack plugin validator rejects compatibility warnings'
+$missingRuntimeCapabilityInspection = $validSlackInspection | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+$missingRuntimeCapabilityInspection.PSObject.Properties.Remove('capabilities')
+$provenanceWithoutRuntimeCapability = Assert-OpenClawSlackPluginProvenance -Inspection $missingRuntimeCapabilityInspection -SourceConfig $config
+Assert-True -Condition $provenanceWithoutRuntimeCapability.Ready -Name 'Snapshot validator does not require runtime plugin execution output'
+Assert-True -Condition ($null -ne (Get-ThrownException {
+    Assert-OpenClawSlackPluginInspection -Inspection $missingRuntimeCapabilityInspection -SourceConfig $config
+})) -Name 'Runtime Slack validator requires the loaded channel capability'
+Assert-Equal -Actual (Get-Command -Name Assert-OpenClawSlackPluginProvenance).Name -Expected 'Assert-OpenClawSlackPluginProvenance' -Name 'Snapshot provenance validator is exported for Settings reuse'
 
 $plan = @(Get-OpenClawInstallPlan)
 Assert-Equal -Actual $plan.Count -Expected 8 -Name 'Install plan has eight explicit stages'
@@ -126,6 +211,16 @@ Assert-True -Condition ($moduleSourceText.Contains("OpenClaw-Easy-Setup/0.4")) -
 Assert-True -Condition ($moduleSourceText.Contains('GIT_CONFIG_NOSYSTEM') -and $moduleSourceText.Contains('GIT_CONFIG_GLOBAL')) -Name 'Installer isolates system and user Git configuration'
 Assert-True -Condition ($moduleSourceText.Contains('uninstall --global openclaw --ignore-scripts')) -Name 'Exact-version repair disables package lifecycle scripts during removal'
 Assert-True -Condition ($moduleSourceText.Contains('$forceNestedConfirmation') -and $moduleSourceText.Contains('Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true')) -Name 'Explicit confirmation is preserved for nested onboarding changes'
+Assert-True -Condition ($moduleSourceText.Contains("@('plugins', 'install', `$installSpec, '--pin')")) -Name 'Slack plugin installation uses the exact official CLI pin flow'
+$slackInspectionFunctionSource = & $openClawModule {
+    (Get-Command -Name Get-OpenClawSlackPluginInspection).ScriptBlock.ToString()
+}
+$snapshotInspectIndex = $slackInspectionFunctionSource.IndexOf("@('plugins', 'inspect', `$pluginId, '--json')", [StringComparison]::Ordinal)
+$provenanceGateIndex = $slackInspectionFunctionSource.IndexOf('Assert-OpenClawSlackPluginProvenance -Inspection $snapshotInspection', [StringComparison]::Ordinal)
+$runtimeInspectIndex = $slackInspectionFunctionSource.IndexOf("@('plugins', 'inspect', `$pluginId, '--runtime', '--json')", [StringComparison]::Ordinal)
+Assert-True -Condition ($snapshotInspectIndex -ge 0) -Name 'Slack plugin inspection starts with a non-runtime JSON snapshot'
+Assert-True -Condition ($provenanceGateIndex -gt $snapshotInspectIndex) -Name 'Slack plugin snapshot is provenance-checked before runtime inspection'
+Assert-True -Condition ($runtimeInspectIndex -gt $provenanceGateIndex) -Name 'Slack plugin code can load only after the snapshot provenance gate passes'
 
 $entryPoint = Join-Path $projectRoot 'OpenClawEasySetup.ps1'
 $entrySourceText = Get-Content -LiteralPath $entryPoint -Raw -Encoding UTF8
@@ -141,8 +236,11 @@ $modulePathBeforePreview = $env:PSModulePath
 & $entryPoint -Action Install
 Assert-True -Condition $? -Name 'Install preview completes without starting installation'
 Assert-Equal -Actual $env:PSModulePath -Expected $modulePathBeforePreview -Name 'CLI preview restores the caller PowerShell module path'
-& $entryPoint -Action Install -Apply -WhatIf
-Assert-True -Condition $? -Name 'WhatIf plans prerequisite and OpenClaw changes without downloading or installing'
+$whatIfHostExecutable = (Get-Process -Id $PID).Path
+$installWhatIfOutput = (& $whatIfHostExecutable -NoLogo -NoProfile -ExecutionPolicy Bypass -File $entryPoint -Action Install -Apply -WhatIf 2>&1 | Out-String)
+$installWhatIfExitCode = $LASTEXITCODE
+Assert-Equal -Actual $installWhatIfExitCode -Expected 0 -Name 'WhatIf plans prerequisite and OpenClaw changes without downloading or installing'
+Assert-True -Condition $installWhatIfOutput.Contains([string]$config.slackPlugin.installSpec) -Name 'WhatIf shows the exact Slack plugin as a separate planned action'
 
 $trackedCandidates = Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object {
     $_.FullName -notmatch '[\\/]\.git[\\/]' -and

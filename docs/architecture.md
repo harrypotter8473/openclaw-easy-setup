@@ -110,13 +110,14 @@ GUI는 실행 중인 WinGet·npm·설치 프로세스를 강제로 종료하지 
 - `session.dmScope=per-channel-peer`
 - `tools.profile=messaging`과 runtime, filesystem, automation, UI, node, plugin, MCP bundle 그룹 명시적 차단
 - elevated 도구 비활성화
+- 선택한 Slack에 Socket Mode, bot/app SecretRef, `dmPolicy=pairing`, 채널·그룹 DM 차단, mention 필수, native/slash 명령·bot 메시지·이름 매칭·`configWrites` 차단
 - 선택한 Telegram/Discord에 `dmPolicy=pairing`, `groupPolicy=disabled`, `configWrites=false`
 
 채널은 선택 사항이며 선택하지 않은 채널은 patch에 넣지 않습니다. 선택한 채널 객체는 표시된 안전 기본값으로 정확히 교체되고, 선택하지 않은 채널은 유지됩니다. 공개 네트워크, 그룹 대화, 채널을 통한 설정 쓰기 또는 파일·명령 실행 권한을 마법사가 자동 활성화하지 않습니다.
 
 ### Credential Manager와 exec SecretRef
 
-모델 키와 선택한 봇 토큰은 WPF `PasswordBox`에서 `SecureString`으로 복사하고, Gateway용 256-bit 토큰은 프로세스 안에서 새로 생성합니다. 각 적용 계획은 128-bit 실행 ID를 포함하는 자격 증명 ID를 사용하므로 기존 자격 증명을 덮어쓰지 않습니다. 비밀값은 현재 Windows 사용자의 Credential Manager에 저장하고 OpenClaw patch에는 다음 세 요소만 넣습니다.
+모델 키, Slack Bot User OAuth Token·App-Level Token과 선택한 봇 토큰은 WPF `PasswordBox`에서 `SecureString`으로 복사하고, Gateway용 256-bit 토큰은 프로세스 안에서 새로 생성합니다. 각 적용 계획은 128-bit 실행 ID를 포함하는 자격 증명 ID를 사용하므로 기존 자격 증명을 덮어쓰지 않습니다. 비밀값은 현재 Windows 사용자의 Credential Manager에 저장하고 OpenClaw patch에는 다음 세 요소만 넣습니다.
 
 ```text
 source=exec
@@ -130,7 +131,7 @@ Credential Manager는 평문 설정 파일 노출을 줄이지만 같은 Windows
 
 ### 적용과 사후 검사
 
-사용자가 dry-run 미리보기를 확인한 뒤 기본적으로 꺼진 승인 체크를 직접 선택해야 적용 버튼이 활성화됩니다. 자격 증명 저장 뒤의 `--allow-exec` dry-run은 exec SecretRef 해석이 완전하고 건너뛴 참조가 0개인지 확인합니다. patch 적용 직후 파일 SHA-256을 기록합니다. 사후 검사에서 이 바이트 지문, `config validate`, loopback·최소 권한·채널 안전 불변 조건이 모두 통과한 뒤에만 Gateway 서비스를 설치·재시작합니다. 하나라도 실패하면 Gateway 변경을 건너뛰고 실패로 기록한 뒤, `secrets audit --check --allow-exec`, `security audit --deep`, 모델 상태, 선택한 채널 probe와 Gateway RPC 상태를 검사합니다.
+사용자가 dry-run 미리보기를 확인한 뒤 기본적으로 꺼진 승인 체크를 직접 선택해야 적용 버튼이 활성화됩니다. Slack 플러그인은 앞선 설치 단계에서 공식 `@openclaw/slack@2026.7.1`로 고정되며, 설정 엔진은 ID·버전·npm 출처·integrity·shasum·로드 상태·Slack capability를 다시 읽기 전용으로 검사합니다. 자격 증명 저장 뒤의 `--allow-exec` dry-run은 exec SecretRef 해석이 완전하고 건너뛴 참조가 0개인지 확인합니다. patch 적용 직후 파일 SHA-256을 기록합니다. 사후 검사에서 플러그인 출처, 이 바이트 지문, `config validate`, loopback·최소 권한·채널 안전 불변 조건이 모두 통과한 뒤에만 Gateway 서비스를 설치·재시작합니다. 하나라도 실패하면 Gateway 변경을 건너뛰고 실패로 기록한 뒤, `secrets audit --check --allow-exec`, `security audit --deep`, 모델 상태, 선택한 채널 probe와 Gateway RPC 상태를 검사합니다. Slack probe는 bot token만 확인하므로 bot/app SecretRef 가용성, runtime 실행과 Socket 연결까지 함께 성공해야 합니다.
 
 첫 Credential Manager 쓰기 전에는 private State 폴더에 계획 지문, 정확한 자격 증명 ID, 적용 전후 설정 해시, 정제된 검사 상세를 담는 비밀값 없는 `Preparing` 복구 기록을 원자적으로 만듭니다. patch가 성공하면 사후 검사 전에 `AppliedPendingChecks`, 검사 뒤에는 `Succeeded` 또는 `Partial`로 원자 전환합니다. 설정 patch 전 실패하고 기존 설정 해시가 그대로면 이번 실행에서 실제로 만든 정확한 자격 증명 ID만 삭제하고 `RolledBack`으로 끝냅니다. patch 뒤에는 자동 롤백하지 않습니다.
 

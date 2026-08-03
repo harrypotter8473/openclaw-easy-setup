@@ -25,7 +25,7 @@ namespace OpenClawEasySetup
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         private static readonly Regex CredentialIdPattern = new Regex(
-            "^v1/(gateway/auth/token|models/(openai|anthropic|google)/api-key|channels/(telegram/bot-token|discord/bot-token))/[A-Fa-f0-9]{32}$",
+            "^v1/(gateway/auth/token|models/(openai|anthropic|google)/api-key|channels/(slack/(bot-token|app-token)|telegram/bot-token|discord/bot-token))/[A-Fa-f0-9]{32}$",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         [StructLayout(LayoutKind.Sequential)]

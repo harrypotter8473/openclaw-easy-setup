@@ -20,7 +20,8 @@ Windows 초보자가 OpenClaw를 안전하게 설치하고, 중단되더라도 �
 - 중단된 설치 자동 감지, 한 번 누르는 재개, 오류 코드·로그·진단 ZIP 안내
 - Windows 시스템 색상, 키보드 탐색과 화면 읽기 도구용 접근성 정보
 - OpenAI·Anthropic·Google 모델 제공자와 검토된 모델 선택
-- 선택 사항인 Telegram·Discord 연결과 DM 페어링·그룹 차단 기본값
+- 공식 `@openclaw/slack@2026.7.1` 플러그인의 고정 버전·npm 무결성 설치와 실행 시 재검증
+- Slack 우선, Telegram·Discord 선택 연결과 DM 페어링·그룹 차단 기본값
 - Windows Credential Manager와 네이티브 SecretRef resolver를 이용한 비밀정보 저장
 - 공식 설정 스키마, dry-run, 설정 차이, 계획 지문을 확인한 뒤에만 적용하는 쉬운 설정 마법사
 - 로컬 loopback Gateway, 256-bit 인증 토큰, messaging 권한과 명시적 고위험 도구 차단
@@ -59,15 +60,16 @@ GUI에서는 다음 작업을 선택할 수 있습니다.
 메인 화면에서 `OpenClaw 설정`을 선택하면 0.4 설정 마법사가 열립니다.
 
 1. OpenAI, Anthropic 또는 Google과 사용할 모델을 선택합니다.
-2. 모델 API 키를 입력하고, 필요하면 Telegram 또는 Discord와 봇 토큰을 추가합니다. 비밀값 입력란은 일반 텍스트 상자가 아닌 Windows WPF `PasswordBox`입니다.
+2. 모델 API 키를 입력하고, 필요하면 가장 위의 Slack 또는 Telegram·Discord를 선택합니다. Slack은 먼저 [고정 커밋의 공식 Socket Mode manifest 절차](https://github.com/openclaw/openclaw/blob/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/docs/channels/slack.md)로 앱을 만들고 워크스페이스에 설치해야 하며, Bot User OAuth Token과 `connections:write` App-Level Token 두 개가 필요합니다. 모든 비밀값 입력란은 일반 텍스트 상자가 아닌 Windows WPF `PasswordBox`입니다.
 3. `변경 미리보기`를 눌러 비밀값이 제거된 설정 차이와 공식 OpenClaw dry-run 결과를 확인합니다.
 4. 내용을 확인한 뒤 기본적으로 꺼져 있는 적용 승인을 직접 선택하고 `설정 적용`을 누릅니다.
 
-마법사는 Gateway용 256-bit 토큰을 자동 생성합니다. API 키와 토큰은 현재 Windows 사용자의 Credential Manager에 실행별 고유 ID로 저장되고, OpenClaw 설정에는 평문 대신 네이티브 resolver를 가리키는 SecretRef만 기록됩니다. 선택한 공급자·채널과 Gateway 인증 등 Easy Setup 소유 경로는 공식 `--replace-path`로 정확히 교체해 이전 사용자 지정 API 주소나 헤더가 새 키를 받지 못하게 하고, 선택하지 않은 채널과 나머지 설정은 유지합니다. 적용 후에는 승인 패치의 설정 해시 연속성·유효성·안전 불변 조건을 먼저 확인한 뒤만 Gateway를 설치·재시작하고, SecretRef resolver, 보안 감사, 모델·채널 상태와 Gateway RPC를 검사합니다. 첫 자격 증명 쓰기 전부터 전용 복구 기록을 남겨 중단·부분 적용을 다음 실행에서 감지하며, 새 적용 대신 안전한 정리 또는 사후 검사 재실행을 안내합니다. 중단된 모델·채널 자격 증명 교체는 별도 승인 뒤 기록에 묶인 전체 세트를 모두 다시 입력해 같은 ID에 완전히 다시 쓰어야 하며 Gateway token은 그대로 유지합니다. 설정 해시가 달라진 복구는 현재 파일을 그대로 신뢰하지 않고, 복구 기록의 OpenClaw 버전·스키마·활성 설정 경로를 재확인한 후 별도 승인 아래 Easy Setup 소유 경로만 기록에 묶인 패치로 복원합니다.
+설치 단계는 OpenClaw 본체와 같은 `2026.7.1` 버전의 공식 Slack 플러그인을 정확한 npm integrity·shasum에 고정해 준비합니다. 이미 다른 출처나 버전의 `slack` 플러그인이 있으면 덮어쓰지 않고 중단합니다. 마법사는 Gateway용 256-bit 토큰을 자동 생성합니다. API 키와 채널 토큰은 현재 Windows 사용자의 Credential Manager에 실행별 고유 ID로 저장되고, OpenClaw 설정에는 평문 대신 네이티브 resolver를 가리키는 SecretRef만 기록됩니다. 선택한 공급자·채널과 Gateway 인증 등 Easy Setup 소유 경로는 공식 `--replace-path`로 정확히 교체해 이전 사용자 지정 API 주소나 헤더가 새 키를 받지 못하게 하고, 선택하지 않은 채널과 나머지 설정은 유지합니다. 적용 후에는 Slack 플러그인 출처, 승인 패치의 설정 해시 연속성·유효성·안전 불변 조건을 먼저 확인한 뒤만 Gateway를 설치·재시작하고, SecretRef resolver, 보안 감사, 모델·채널 상태와 Gateway RPC를 검사합니다. 첫 자격 증명 쓰기 전부터 전용 복구 기록을 남겨 중단·부분 적용을 다음 실행에서 감지하며, 새 적용 대신 안전한 정리 또는 사후 검사 재실행을 안내합니다. 중단된 모델·채널 자격 증명 교체는 별도 승인 뒤 기록에 묶인 전체 세트를 모두 다시 입력해 같은 ID에 완전히 다시 쓰어야 하며 Gateway token은 그대로 유지합니다. 설정 해시가 달라진 복구는 현재 파일을 그대로 신뢰하지 않고, 복구 기록의 OpenClaw 버전·스키마·활성 설정 경로를 재확인한 후 별도 승인 아래 Easy Setup 소유 경로만 기록에 묶인 패치로 복원합니다.
 
 ```text
 Gateway        local + loopback + token, Tailscale/terminal 끔
 도구           messaging 프로필 + runtime/fs/automation/ui/nodes/plugins/elevated 차단
+Slack          Socket Mode + DM pairing + 채널/그룹 DM/명령/configWrites 차단
 Telegram       DM pairing + 그룹 disabled + configWrites false
 Discord        DM pairing + 서버 그룹 disabled + configWrites false
 세션           채널과 상대별 DM 세션 분리
@@ -152,6 +154,7 @@ powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -File .\OpenClawEasySetup
 - 신뢰할 수 있는 Git for Windows가 없으면 WinGet의 `Git.Git` `2.55.0.3`을 정확히 지정합니다. 공식 설치 스크립트에는 이 서명된 Git만 노출해 별도의 고정되지 않은 Git 다운로드를 막습니다.
 - Node.js와 npm이 없거나 지원되지 않으면 WinGet의 `OpenJS.NodeJS` 패키지, `winget` 소스, Node.js `26.5.1`을 정확히 지정합니다.
 - 설치 버전, 커밋, 주소, 최대 크기, SHA-256은 [`config/openclaw-source.json`](config/openclaw-source.json)에 함께 고정합니다.
+- 공식 Slack 플러그인의 정확한 패키지·버전·npm integrity·shasum도 같은 파일에 고정하고 설치·검증합니다.
 - 리디렉션이 발생해도 매 단계의 프로토콜과 호스트를 다시 검사합니다.
 - 내려받은 스크립트는 크기·문법·SHA-256과 dry-run을 확인한 뒤에만 실행합니다.
 - 재개할 때도 저장된 결과를 맹신하지 않고 현재 설치 상태와 보안 조건을 다시 확인합니다.
@@ -169,7 +172,7 @@ powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -File .\OpenClawEasySetup
 
 ## 공식 기준
 
-2026-08-02에 다음 공식 자료를 검토해 요구사항을 기록했습니다.
+2026-08-03에 다음 공식 자료를 검토해 요구사항을 기록했습니다.
 
 - [OpenClaw 공식 저장소](https://github.com/openclaw/openclaw)
 - [공식 설치 문서](https://docs.openclaw.ai/install)
@@ -177,6 +180,7 @@ powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -File .\OpenClawEasySetup
 - [보안 문서](https://docs.openclaw.ai/gateway/security)
 - [설정 CLI 문서](https://docs.openclaw.ai/cli/config)
 - [SecretRef 문서](https://docs.openclaw.ai/gateway/secrets)
+- [고정 커밋의 Slack 설정 문서](https://github.com/openclaw/openclaw/blob/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/docs/channels/slack.md)
 
 현재 공식 요구사항은 Node.js 26 권장, Node.js 22.22.3+, 24.15+ 또는 25.9+ 지원입니다. 공식 Windows 설치 후 `openclaw onboard --install-daemon`으로 온보딩할 수 있습니다. 이 도우미는 비밀정보를 평문으로 남길 가능성을 줄이기 위해 온보딩을 `--secret-input-mode ref`와 함께 시작합니다. 요구사항은 바뀔 수 있으므로 릴리스 전마다 다시 검토합니다.
 

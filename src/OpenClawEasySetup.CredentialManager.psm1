@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:CredentialIdPattern = [regex]::new(
-    '^v1/(gateway/auth/token|models/(openai|anthropic|google)/api-key|channels/(telegram/bot-token|discord/bot-token))/[A-Fa-f0-9]{32}$',
+    '^v1/(gateway/auth/token|models/(openai|anthropic|google)/api-key|channels/(slack/(bot-token|app-token)|telegram/bot-token|discord/bot-token))/[A-Fa-f0-9]{32}$',
     [Text.RegularExpressions.RegexOptions]::CultureInvariant
 )
 $script:CredentialPurposes = @(
@@ -9,6 +9,8 @@ $script:CredentialPurposes = @(
     'models/openai/api-key',
     'models/anthropic/api-key',
     'models/google/api-key',
+    'channels/slack/bot-token',
+    'channels/slack/app-token',
     'channels/telegram/bot-token',
     'channels/discord/bot-token'
 )
@@ -82,6 +84,8 @@ function New-OpenClawCredentialId {
             'models/openai/api-key',
             'models/anthropic/api-key',
             'models/google/api-key',
+            'channels/slack/bot-token',
+            'channels/slack/app-token',
             'channels/telegram/bot-token',
             'channels/discord/bot-token'
         )]
@@ -130,7 +134,7 @@ namespace OpenClawEasySetup
         private const string TargetPrefix = "OpenClawEasySetup:";
 
         private static readonly Regex IdPattern = new Regex(
-            "^v1/(gateway/auth/token|models/(openai|anthropic|google)/api-key|channels/(telegram/bot-token|discord/bot-token))/[A-Fa-f0-9]{32}$",
+            "^v1/(gateway/auth/token|models/(openai|anthropic|google)/api-key|channels/(slack/(bot-token|app-token)|telegram/bot-token|discord/bot-token))/[A-Fa-f0-9]{32}$",
             RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

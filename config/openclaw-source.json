@@ -1,10 +1,18 @@
 {
   "schemaVersion": 1,
-  "reviewedOn": "2026-08-02",
+  "reviewedOn": "2026-08-03",
   "openClaw": {
     "version": "2026.7.1",
     "releaseTag": "v2026.7.1",
     "commitSha": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4"
+  },
+  "slackPlugin": {
+    "id": "slack",
+    "package": "@openclaw/slack",
+    "version": "2026.7.1",
+    "installSpec": "@openclaw/slack@2026.7.1",
+    "npmIntegrity": "sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA==",
+    "npmShasum": "942d747f74faa4c864a7b360e95f0f1dd0329a14"
   },
   "installer": {
     "uri": "https://raw.githubusercontent.com/openclaw/openclaw/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/scripts/install.ps1",
