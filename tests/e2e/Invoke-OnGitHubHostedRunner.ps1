@@ -168,6 +168,46 @@ function Get-OpenClawE2EPostconditionErrorCode {
     return 'E2E-POSTCONDITION-FAILED'
 }
 
+function Get-OpenClawE2ECheckpointMismatchCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Checkpoint
+    )
+
+    $expectedStages = @(
+        [pscustomobject]@{ id = 'diagnose'; status = 'Succeeded'; code = 'E2E-CHECKPOINT-STAGE-DIAGNOSE-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'node'; status = 'Succeeded'; code = 'E2E-CHECKPOINT-STAGE-NODE-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'download'; status = 'Succeeded'; code = 'E2E-CHECKPOINT-STAGE-DOWNLOAD-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'integrity'; status = 'Succeeded'; code = 'E2E-CHECKPOINT-STAGE-INTEGRITY-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'dryRun'; status = 'Succeeded'; code = 'E2E-CHECKPOINT-STAGE-DRY-RUN-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'install'; status = 'Succeeded'; code = 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'onboard'; status = 'Skipped'; code = 'E2E-CHECKPOINT-STAGE-ONBOARD-STATUS-MISMATCH' }
+        [pscustomobject]@{ id = 'verify'; status = 'Skipped'; code = 'E2E-CHECKPOINT-STAGE-VERIFY-STATUS-MISMATCH' }
+    )
+    $steps = @($Checkpoint.Steps)
+    if ($steps.Count -ne $expectedStages.Count) {
+        throw 'E2E-CHECKPOINT-INVALID'
+    }
+
+    for ($index = 0; $index -lt $expectedStages.Count; $index++) {
+        $stepId = [string]$steps[$index].Id
+        $stepStatus = [string]$steps[$index].Status
+        if ($stepId -ne $expectedStages[$index].id -or
+            $stepStatus -notin @('Pending', 'Running', 'Succeeded', 'Failed', 'Skipped')) {
+            throw 'E2E-CHECKPOINT-INVALID'
+        }
+    }
+    for ($index = 0; $index -lt $expectedStages.Count; $index++) {
+        if ([string]$steps[$index].Status -ne $expectedStages[$index].status) {
+            return [string]$expectedStages[$index].code
+        }
+    }
+    if ([string]$Checkpoint.Status -ne 'Completed') {
+        return 'E2E-CHECKPOINT-TOP-LEVEL-STATUS-MISMATCH'
+    }
+    return ''
+}
+
 function Get-OpenClawE2ECheckpointEvidence {
     param(
         [Parameter(Mandatory = $true)]
@@ -199,38 +239,19 @@ function Get-OpenClawE2ECheckpointEvidence {
     catch {
         throw 'E2E-CHECKPOINT-INVALID'
     }
-    $expectedStages = @(
-        [pscustomobject]@{ id = 'diagnose'; status = 'Succeeded' }
-        [pscustomobject]@{ id = 'node'; status = 'Succeeded' }
-        [pscustomobject]@{ id = 'download'; status = 'Succeeded' }
-        [pscustomobject]@{ id = 'integrity'; status = 'Succeeded' }
-        [pscustomobject]@{ id = 'dryRun'; status = 'Succeeded' }
-        [pscustomobject]@{ id = 'install'; status = 'Succeeded' }
-        [pscustomobject]@{ id = 'onboard'; status = 'Skipped' }
-        [pscustomobject]@{ id = 'verify'; status = 'Skipped' }
-    )
     $steps = @($checkpoint.Steps)
-    if ($steps.Count -ne $expectedStages.Count) {
-        throw 'E2E-CHECKPOINT-INVALID'
-    }
-
-    $matchesExpected = [string]$checkpoint.Status -eq 'Completed'
+    $mismatchCode = Get-OpenClawE2ECheckpointMismatchCode -Checkpoint $checkpoint
     $safeStages = New-Object Collections.Generic.List[object]
-    for ($index = 0; $index -lt $expectedStages.Count; $index++) {
-        $stepId = [string]$steps[$index].Id
-        $stepStatus = [string]$steps[$index].Status
-        if ($stepId -ne $expectedStages[$index].id -or
-            $stepStatus -notin @('Pending', 'Running', 'Succeeded', 'Failed', 'Skipped')) {
-            throw 'E2E-CHECKPOINT-INVALID'
-        }
-        if ($stepStatus -ne $expectedStages[$index].status) {
-            $matchesExpected = $false
-        }
-        $safeStages.Add([pscustomobject]@{ id = $stepId; status = $stepStatus })
+    foreach ($step in $steps) {
+        $safeStages.Add([pscustomobject]@{
+            id = [string]$step.Id
+            status = [string]$step.Status
+        })
     }
 
     return [pscustomobject]@{
-        MatchesExpected = $matchesExpected
+        MatchesExpected = [string]::IsNullOrWhiteSpace($mismatchCode)
+        FailureCode = $mismatchCode
         Stages = $safeStages.ToArray()
     }
 }
@@ -403,6 +424,15 @@ $safeHarnessCodes = @(
     'E2E-ENVIRONMENT-SCRUB-FAILED',
     'E2E-TRUSTED-POWERSHELL-MISSING',
     'E2E-CHECKPOINT-INVALID',
+    'E2E-CHECKPOINT-STAGE-DIAGNOSE-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-NODE-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-DOWNLOAD-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-INTEGRITY-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-DRY-RUN-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-ONBOARD-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-VERIFY-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-TOP-LEVEL-STATUS-MISMATCH',
     'E2E-SLACK-VERIFICATION-FAILED',
     'E2E-RESULT-PERSISTENCE-FAILED',
     'E2E-HARNESS-PREFLIGHT-001',
@@ -605,6 +635,13 @@ try {
     if ($null -ne $checkpointEvidence) {
         $result.stages = @($checkpointEvidence.Stages)
         $result.installationSucceeded = [bool]$checkpointEvidence.MatchesExpected
+        if (-not $result.installationSucceeded -and
+            [string]::IsNullOrWhiteSpace([string]$result.errorCode)) {
+            $result.errorCode = Resolve-OpenClawE2EHarnessErrorCode `
+                -CandidateCode ([string]$checkpointEvidence.FailureCode) `
+                -Phase $harnessPhase `
+                -SafeCodes $safeHarnessCodes
+        }
     }
 
     $harnessPhase = 'provenance'

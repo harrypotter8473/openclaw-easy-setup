@@ -207,6 +207,9 @@ Assert-True -Condition ($module.Contains('''Get-OpenClawSlackPluginInspection'''
 Assert-True -Condition ($controller.Contains('E2E-RESULT-PERSISTENCE-FAILED') -and $controller.Contains('-not $resultWritten')) -Name 'Missing result persistence fails the E2E run closed'
 Assert-True -Condition ($controller.Contains('if ($result.installerExitCode -eq 0)') -and $controller.Contains('$checkpointEvidence = $null')) -Name 'Installer failures preserve their safe code when checkpoint evidence is unavailable'
 Assert-True -Condition ($controller.Contains("throw 'E2E-CHECKPOINT-INVALID'") -and $controller.Contains('Stages = $safeStages.ToArray()') -and -not $controller.Contains('Stages = @($safeStages)')) -Name 'Checkpoint reads fail safely and PowerShell 5.1 materializes stage evidence explicitly'
+Assert-True -Condition ($controller.Contains('Get-OpenClawE2ECheckpointMismatchCode -Checkpoint $checkpoint') -and
+    $controller.Contains('-CandidateCode ([string]$checkpointEvidence.FailureCode)') -and
+    $controller.Contains('E2E-CHECKPOINT-TOP-LEVEL-STATUS-MISMATCH')) -Name 'Checkpoint mismatches are reduced to fixed safe diagnostic codes'
 Assert-True -Condition ($controller.Contains('Get-OpenClawE2EPostconditionErrorCode -Result $result') -and
     $controller.Contains('E2E-POSTCONDITION-INSTALLATION-FAILED') -and
     $controller.Contains('E2E-POSTCONDITION-PROVENANCE-FAILED') -and
@@ -431,26 +434,90 @@ $successfulStages = @(
         }
     }
 )
+$checkpointMismatchSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2ECheckpointMismatchCode'
+$checkpointMismatchCaseSource = @(
+    'param([object[]]$ExpectedSteps)',
+    $checkpointMismatchSource,
+    'function Copy-CheckpointSteps {',
+    '    param([object[]]$SourceSteps)',
+    '    return @($SourceSteps | ForEach-Object { [pscustomobject]@{ Id = [string]$_.id; Status = [string]$_.status } })',
+    '}',
+    '$stageCodes = @()',
+    'for ($index = 0; $index -lt $ExpectedSteps.Count; $index++) {',
+    '    $steps = Copy-CheckpointSteps -SourceSteps $ExpectedSteps',
+    '    $steps[$index].Status = ''Pending''',
+    '    $stageCodes += Get-OpenClawE2ECheckpointMismatchCode -Checkpoint ([pscustomobject]@{ Status = ''InProgress''; Steps = $steps })',
+    '}',
+    '$precedenceSteps = Copy-CheckpointSteps -SourceSteps $ExpectedSteps',
+    '$precedenceSteps[1].Status = ''Pending''',
+    '$precedenceSteps[5].Status = ''Pending''',
+    '$precedenceCode = Get-OpenClawE2ECheckpointMismatchCode -Checkpoint ([pscustomobject]@{ Status = ''InProgress''; Steps = $precedenceSteps })',
+    '$topLevelCode = Get-OpenClawE2ECheckpointMismatchCode -Checkpoint ([pscustomobject]@{ Status = ''InProgress''; Steps = (Copy-CheckpointSteps -SourceSteps $ExpectedSteps) })',
+    '$invalidCodes = @()',
+    'try {',
+    '    $shortSteps = @((Copy-CheckpointSteps -SourceSteps $ExpectedSteps) | Select-Object -First 7)',
+    '    [void](Get-OpenClawE2ECheckpointMismatchCode -Checkpoint ([pscustomobject]@{ Status = ''InProgress''; Steps = $shortSteps }))',
+    '}',
+    'catch { $invalidCodes += [string]$_.Exception.Message }',
+    'try {',
+    '    $maliciousIdSteps = Copy-CheckpointSteps -SourceSteps $ExpectedSteps',
+    '    $maliciousIdSteps[0].Status = ''Pending''',
+    '    $maliciousIdSteps[7].Id = ''verify'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''',
+    '    [void](Get-OpenClawE2ECheckpointMismatchCode -Checkpoint ([pscustomobject]@{ Status = ''InProgress''; Steps = $maliciousIdSteps }))',
+    '}',
+    'catch { $invalidCodes += [string]$_.Exception.Message }',
+    'try {',
+    '    $maliciousStatusSteps = Copy-CheckpointSteps -SourceSteps $ExpectedSteps',
+    '    $maliciousStatusSteps[0].Status = ''Pending''',
+    '    $maliciousStatusSteps[7].Status = ''Skipped'' + [Environment]::NewLine + ''token''',
+    '    [void](Get-OpenClawE2ECheckpointMismatchCode -Checkpoint ([pscustomobject]@{ Status = ''InProgress''; Steps = $maliciousStatusSteps }))',
+    '}',
+    'catch { $invalidCodes += [string]$_.Exception.Message }',
+    '[pscustomobject]@{ StageCodes = $stageCodes; PrecedenceCode = $precedenceCode; TopLevelCode = $topLevelCode; InvalidCodes = $invalidCodes }'
+) -join [Environment]::NewLine
+$checkpointMismatchEvidence = & ([scriptblock]::Create($checkpointMismatchCaseSource)) $successfulStages
+$expectedCheckpointStageCodes = @(
+    'E2E-CHECKPOINT-STAGE-DIAGNOSE-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-NODE-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-DOWNLOAD-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-INTEGRITY-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-DRY-RUN-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-ONBOARD-STATUS-MISMATCH',
+    'E2E-CHECKPOINT-STAGE-VERIFY-STATUS-MISMATCH'
+)
+Assert-True -Condition (($checkpointMismatchEvidence.StageCodes -join ',') -eq ($expectedCheckpointStageCodes -join ',')) -Name 'Every checkpoint stage mismatch maps to its fixed code'
+Assert-True -Condition ($checkpointMismatchEvidence.PrecedenceCode -eq 'E2E-CHECKPOINT-STAGE-NODE-STATUS-MISMATCH' -and
+    $checkpointMismatchEvidence.TopLevelCode -eq 'E2E-CHECKPOINT-TOP-LEVEL-STATUS-MISMATCH') -Name 'Checkpoint mismatch precedence selects the first causal stage before the top-level fallback'
+Assert-True -Condition (@($checkpointMismatchEvidence.InvalidCodes).Count -eq 3 -and
+    @($checkpointMismatchEvidence.InvalidCodes | Where-Object { $_ -ne 'E2E-CHECKPOINT-INVALID' }).Count -eq 0) -Name 'Malformed checkpoint shape, IDs, and statuses fail closed before classification'
+$allCheckpointCodes = @($checkpointMismatchEvidence.StageCodes) + @($checkpointMismatchEvidence.PrecedenceCode, $checkpointMismatchEvidence.TopLevelCode) + @($checkpointMismatchEvidence.InvalidCodes)
+Assert-True -Condition (@($allCheckpointCodes | Where-Object { [string]$_ -notmatch '^E2E-[A-Z0-9-]{1,64}$' }).Count -eq 0) -Name 'Checkpoint diagnostics never reflect raw IDs, statuses, paths, or secrets'
 $checkpointEvidenceSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2ECheckpointEvidence'
 $checkpointCaseSource = @(
-    'param([string]$StateRootValue, [object[]]$StepsValue)',
+    'param([string]$StateRootValue, [object[]]$StepsValue, [string]$StatusValue)',
+    $checkpointMismatchSource,
     $checkpointEvidenceSource,
     'function Read-OpenClawCheckpoint {',
     '    param([string]$Path, [string]$ExpectedTargetVersion, [string]$ExpectedSourceFingerprint)',
-    '    return [pscustomobject]@{ Status = ''Completed''; Steps = @($StepsValue) }',
+    '    return [pscustomobject]@{ Status = $StatusValue; Steps = @($StepsValue) }',
     '}',
     'Get-OpenClawE2ECheckpointEvidence -StateRoot $StateRootValue -ExpectedTargetVersion ''2026.7.1'' -ExpectedSourceFingerprint (''A'' * 64)'
 ) -join [Environment]::NewLine
 $checkpointCaseRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('OpenClawE2ECheckpointTest-' + [guid]::NewGuid().ToString('N'))))
 $checkpointTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $checkpointEvidence = $null
+$checkpointMismatchIntegrationEvidence = $null
 $checkpointEvidenceException = $null
 try {
     $checkpointStatePath = Join-Path $checkpointCaseRoot 'State'
     [void][IO.Directory]::CreateDirectory($checkpointStatePath)
     [IO.File]::WriteAllText((Join-Path $checkpointStatePath (('a' * 32) + '.json')), '{}', (New-Object Text.UTF8Encoding($false)))
     try {
-        $checkpointEvidence = & ([scriptblock]::Create($checkpointCaseSource)) $checkpointCaseRoot $successfulStages
+        $checkpointEvidence = & ([scriptblock]::Create($checkpointCaseSource)) $checkpointCaseRoot $successfulStages 'Completed'
+        $integrationSteps = @($successfulStages | ForEach-Object { [pscustomobject]@{ id = [string]$_.id; status = [string]$_.status } })
+        $integrationSteps[5].status = 'Pending'
+        $checkpointMismatchIntegrationEvidence = & ([scriptblock]::Create($checkpointCaseSource)) $checkpointCaseRoot $integrationSteps 'InProgress'
     }
     catch {
         $checkpointEvidenceException = $_.Exception
@@ -461,7 +528,8 @@ finally {
         [IO.Directory]::Delete($checkpointCaseRoot, $true)
     }
 }
-Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointEvidence -and @($checkpointEvidence.Stages).Count -eq 8 -and $checkpointEvidence.MatchesExpected) -Name 'PowerShell 5.1 returns all eight checkpoint stages without Generic List conversion failure'
+Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointEvidence -and @($checkpointEvidence.Stages).Count -eq 8 -and $checkpointEvidence.MatchesExpected -and [string]::IsNullOrWhiteSpace([string]$checkpointEvidence.FailureCode)) -Name 'PowerShell 5.1 returns all eight checkpoint stages without Generic List conversion failure'
+Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointMismatchIntegrationEvidence -and -not $checkpointMismatchIntegrationEvidence.MatchesExpected -and $checkpointMismatchIntegrationEvidence.FailureCode -eq 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH') -Name 'Checkpoint evidence carries only the fixed causal mismatch code'
 $successReceipt = [ordered]@{
     schemaVersion = 1
     success = $true
