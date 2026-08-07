@@ -1856,6 +1856,269 @@ function Start-OpenClawOnboarding {
     return $false
 }
 
+function Get-OpenClawPinnedInstallerNpmFailureDetail {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$NpmCachePath
+    )
+
+    try {
+        $workingPath = [IO.Path]::GetFullPath($WorkingDirectory)
+        $cachePath = [IO.Path]::GetFullPath($NpmCachePath)
+        $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        $temporaryPrefix = $temporaryRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $workingName = [IO.Path]::GetFileName($workingPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))
+        if (-not $workingPath.StartsWith($temporaryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            $workingName -cnotmatch '^OpenClawEasySetup-[a-f0-9]{32}$' -or
+            -not [string]::Equals((Split-Path -Parent $cachePath), $workingPath, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals((Split-Path -Leaf $cachePath), 'npm-cache', [StringComparison]::Ordinal)) {
+            return ''
+        }
+
+        $workingItem = Get-Item -LiteralPath $workingPath -Force -ErrorAction Stop
+        $cacheItem = Get-Item -LiteralPath $cachePath -Force -ErrorAction Stop
+        if (-not $workingItem.PSIsContainer -or -not $cacheItem.PSIsContainer -or
+            ($workingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return ''
+        }
+
+        $logDirectoryPath = [IO.Path]::GetFullPath((Join-Path $cachePath '_logs'))
+        if (-not [string]::Equals((Split-Path -Parent $logDirectoryPath), $cachePath, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $logDirectoryPath -PathType Container)) {
+            return ''
+        }
+        $logDirectoryItem = Get-Item -LiteralPath $logDirectoryPath -Force -ErrorAction Stop
+        if (-not $logDirectoryItem.PSIsContainer -or
+            ($logDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return ''
+        }
+
+        $logEntries = @(Get-ChildItem -LiteralPath $logDirectoryPath -Force -ErrorAction Stop)
+        if ($logEntries.Count -lt 1 -or $logEntries.Count -gt 16) {
+            return ''
+        }
+
+        [long]$totalBytes = 0
+        $logGroups = @{}
+        $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+        foreach ($entry in $logEntries) {
+            if ($entry.PSIsContainer -or
+                ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                -not [string]::Equals((Split-Path -Parent $entry.FullName), $logDirectoryPath, [StringComparison]::OrdinalIgnoreCase) -or
+                $entry.Length -le 0 -or $entry.Length -gt 8MB) {
+                return ''
+            }
+            if ([string]$entry.Name -cnotmatch '^(?<run>\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}_\d{3}Z)-debug-(?<segment>[0-4])\.log$') {
+                return ''
+            }
+            $runKey = [string]$Matches['run']
+            $segment = [int]$Matches['segment']
+            if (-not $logGroups.ContainsKey($runKey)) {
+                $logGroups[$runKey] = [pscustomobject]@{
+                    Segments = @{}
+                    TitleCount = 0
+                    Categories = @{}
+                    UnknownErrorCode = $false
+                    NumericCodeOne = $false
+                    CommandFailed = $false
+                    VerboseExitCount = 0
+                    VerboseExitValues = @{}
+                    VerboseCodeCount = 0
+                    VerboseCodeValues = @{}
+                }
+            }
+            $logGroup = $logGroups[$runKey]
+            if ($logGroup.Segments.ContainsKey($segment)) {
+                return ''
+            }
+            $logGroup.Segments[$segment] = $true
+            $totalBytes += [long]$entry.Length
+            if ($totalBytes -gt 32MB) {
+                return ''
+            }
+
+            $stream = New-Object IO.FileStream($entry.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            try {
+                if ($stream.Length -ne [long]$entry.Length) {
+                    return ''
+                }
+                $prefixBytes = New-Object byte[] 3
+                $prefixCount = $stream.Read($prefixBytes, 0, $prefixBytes.Length)
+                if ($prefixCount -eq 3 -and $prefixBytes[0] -eq 0xEF -and $prefixBytes[1] -eq 0xBB -and $prefixBytes[2] -eq 0xBF) {
+                    return ''
+                }
+                $stream.Position = 0
+                $reader = New-Object IO.StreamReader($stream, $strictUtf8, $false, 4096, $true)
+                try {
+                    while (($line = $reader.ReadLine()) -ne $null) {
+                        if ($line.Length -gt 4096 -or
+                            $line.IndexOf([char]0) -ge 0 -or
+                            $line.IndexOf([char]27) -ge 0 -or
+                            $line -match '[\u202A-\u202E\u2066-\u2069]') {
+                            return ''
+                        }
+                        if ($line.Length -gt 1024) {
+                            continue
+                        }
+                        if ($line -cmatch '^\d{1,6} verbose title npm install(?: .{1,480})?$') {
+                            $logGroup.TitleCount++
+                            continue
+                        }
+                        if ($line -cmatch '^\d{1,6} verbose exit (?<exit>-?\d{1,10})$') {
+                            $exitValue = [string]$Matches['exit']
+                            $logGroup.VerboseExitCount++
+                            $logGroup.VerboseExitValues[$exitValue] = $true
+                            continue
+                        }
+                        if ($line -cmatch '^\d{1,6} verbose code (?<code>-?\d{1,10})$') {
+                            $codeValue = [string]$Matches['code']
+                            $logGroup.VerboseCodeCount++
+                            $logGroup.VerboseCodeValues[$codeValue] = $true
+                            continue
+                        }
+                        if ($line -cmatch '^\d{1,6} error code (?<code>[A-Z][A-Z0-9_-]{0,63}|-?\d{1,10})$') {
+                            $errorCode = [string]$Matches['code']
+                            switch -CaseSensitive ($errorCode) {
+                                'EACCES' { $logGroup.Categories['Npm permission failure.'] = $true }
+                                'EPERM' { $logGroup.Categories['Npm permission failure.'] = $true }
+                                'ENOSPC' { $logGroup.Categories['Npm disk capacity failure.'] = $true }
+                                'ENETWORK' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'ENOTFOUND' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'EAI_AGAIN' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'ECONNREFUSED' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'ECONNRESET' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'EHOSTUNREACH' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'ENETUNREACH' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'ETIMEDOUT' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'ERR_SOCKET_TIMEOUT' { $logGroup.Categories['Npm network failure.'] = $true }
+                                'E404' { $logGroup.Categories['Npm package target failure.'] = $true }
+                                'ETARGET' { $logGroup.Categories['Npm package target failure.'] = $true }
+                                'EBADENGINE' { $logGroup.Categories['Npm engine incompatibility.'] = $true }
+                                'EINTEGRITY' { $logGroup.Categories['Npm integrity failure.'] = $true }
+                                'ELIFECYCLE' { $logGroup.Categories['Npm lifecycle failure.'] = $true }
+                                'ENOENT' { $logGroup.Categories['Npm filesystem failure.'] = $true }
+                                'EEXIST' { $logGroup.Categories['Npm filesystem failure.'] = $true }
+                                'ENOTEMPTY' { $logGroup.Categories['Npm filesystem failure.'] = $true }
+                                'EBUSY' { $logGroup.Categories['Npm filesystem failure.'] = $true }
+                                'ERESOLVE' { $logGroup.Categories['Npm dependency resolution failure.'] = $true }
+                                'E401' { $logGroup.Categories['Npm registry authentication failure.'] = $true }
+                                'E403' { $logGroup.Categories['Npm registry authentication failure.'] = $true }
+                                'CERT_HAS_EXPIRED' { $logGroup.Categories['Npm TLS failure.'] = $true }
+                                'SELF_SIGNED_CERT_IN_CHAIN' { $logGroup.Categories['Npm TLS failure.'] = $true }
+                                'DEPTH_ZERO_SELF_SIGNED_CERT' { $logGroup.Categories['Npm TLS failure.'] = $true }
+                                'UNABLE_TO_VERIFY_LEAF_SIGNATURE' { $logGroup.Categories['Npm TLS failure.'] = $true }
+                                'EUNSUPPORTEDPROTOCOL' { $logGroup.Categories['Npm protocol failure.'] = $true }
+                                '1' { $logGroup.NumericCodeOne = $true }
+                                default { $logGroup.UnknownErrorCode = $true }
+                            }
+                            continue
+                        }
+                        if ($line -cmatch '^\d{1,6} error code(?:\s|$)') {
+                            $logGroup.UnknownErrorCode = $true
+                            continue
+                        }
+                        if ($line -cmatch '^\d{1,6} error command failed$') {
+                            $logGroup.CommandFailed = $true
+                            continue
+                        }
+                    }
+                }
+                finally {
+                    $reader.Dispose()
+                }
+            }
+            finally {
+                $stream.Dispose()
+            }
+        }
+
+        $candidateLogs = @()
+        foreach ($logGroup in $logGroups.Values) {
+            $segments = @($logGroup.Segments.Keys | Sort-Object)
+            if ($segments.Count -lt 1 -or $segments.Count -gt 5 -or $segments[0] -ne 0) {
+                return ''
+            }
+            for ($segmentIndex = 0; $segmentIndex -lt $segments.Count; $segmentIndex++) {
+                if ([int]$segments[$segmentIndex] -ne $segmentIndex) {
+                    return ''
+                }
+            }
+            if ($logGroup.TitleCount -gt 1) {
+                return ''
+            }
+            if ($logGroup.TitleCount -eq 1) {
+                $logGroup | Add-Member -NotePropertyName FailedExit -NotePropertyValue (
+                    $logGroup.VerboseExitCount -eq 1 -and
+                    $logGroup.VerboseExitValues.Count -eq 1 -and
+                    $logGroup.VerboseExitValues.ContainsKey('1') -and
+                    $logGroup.VerboseCodeCount -eq 1 -and
+                    $logGroup.VerboseCodeValues.Count -eq 1 -and
+                    $logGroup.VerboseCodeValues.ContainsKey('1')
+                )
+                $candidateLogs += $logGroup
+            }
+        }
+
+        if ($candidateLogs.Count -ne 1) {
+            return ''
+        }
+        $candidate = $candidateLogs[0]
+        if ($candidate.UnknownErrorCode) {
+            return ''
+        }
+        $categoryNames = @($candidate.Categories.Keys)
+        if ($categoryNames.Count -gt 1) {
+            return ''
+        }
+        if ($categoryNames.Count -eq 1) {
+            if (-not $candidate.FailedExit) {
+                return ''
+            }
+            return [string]$categoryNames[0]
+        }
+        if ($candidate.CommandFailed) {
+            if ($candidate.FailedExit -and $candidate.NumericCodeOne) {
+                return 'Npm lifecycle failure.'
+            }
+            return ''
+        }
+    }
+    catch {
+        return ''
+    }
+    return ''
+}
+
+function Get-OpenClawPinnedInstallerCheckpointDetail {
+    param(
+        [int]$ExitCode,
+
+        [AllowEmptyString()]
+        [string]$FailureDetail = ''
+    )
+
+    switch -CaseSensitive ($FailureDetail) {
+        'Npm permission failure.' { return 'Npm permission failure.' }
+        'Npm disk capacity failure.' { return 'Npm disk capacity failure.' }
+        'Npm network failure.' { return 'Npm network failure.' }
+        'Npm package target failure.' { return 'Npm package target failure.' }
+        'Npm engine incompatibility.' { return 'Npm engine incompatibility.' }
+        'Npm integrity failure.' { return 'Npm integrity failure.' }
+        'Npm lifecycle failure.' { return 'Npm lifecycle failure.' }
+        'Npm filesystem failure.' { return 'Npm filesystem failure.' }
+        'Npm dependency resolution failure.' { return 'Npm dependency resolution failure.' }
+        'Npm registry authentication failure.' { return 'Npm registry authentication failure.' }
+        'Npm TLS failure.' { return 'Npm TLS failure.' }
+        'Npm protocol failure.' { return 'Npm protocol failure.' }
+        default { return ("Exit code {0}" -f $ExitCode) }
+    }
+}
+
 function Invoke-OpenClawPinnedInstallerFile {
     [CmdletBinding()]
     param(
@@ -1867,8 +2130,14 @@ function Invoke-OpenClawPinnedInstallerFile {
 
         [switch]$DryRun,
 
-        [switch]$RepairExactPackage
+        [switch]$RepairExactPackage,
+
+        [ref]$FailureDetail
     )
+
+    if ($null -ne $FailureDetail) {
+        $FailureDetail.Value = ''
+    }
 
     $processEnvironment = [Environment]::GetEnvironmentVariables('Process')
     $savedEnvironment = @{}
@@ -1975,6 +2244,17 @@ function Invoke-OpenClawPinnedInstallerFile {
         try {
             & $hostPath @arguments | Out-Host
             $installerExitCode = [int]$LASTEXITCODE
+            if ($installerExitCode -eq 1 -and $null -ne $FailureDetail) {
+                $classifiedDetail = Get-OpenClawPinnedInstallerNpmFailureDetail `
+                    -WorkingDirectory $safeWorkingDirectory `
+                    -NpmCachePath $safeNpmCache
+                $FailureDetail.Value = Get-OpenClawPinnedInstallerCheckpointDetail `
+                    -ExitCode $installerExitCode `
+                    -FailureDetail $classifiedDetail
+                if ([string]::Equals([string]$FailureDetail.Value, 'Exit code 1', [StringComparison]::Ordinal)) {
+                    $FailureDetail.Value = ''
+                }
+            }
             return $installerExitCode
         }
         finally {
@@ -2513,7 +2793,12 @@ function Install-OpenClawOfficial {
         $checkpoint = Set-OpenClawCheckpointStep -Checkpoint $checkpoint -StepId 'install' -Status 'Running'
         if ($PSCmdlet.ShouldProcess($artifact.Path, ("Install pinned OpenClaw {0}" -f $targetVersion))) {
             try {
-                $installExitCode = Invoke-OpenClawPinnedInstallerFile -InstallerPath $artifact.Path -SourceConfig $sourceConfig -RepairExactPackage:$repairExactPackage
+                $installFailureDetail = ''
+                $installExitCode = Invoke-OpenClawPinnedInstallerFile `
+                    -InstallerPath $artifact.Path `
+                    -SourceConfig $sourceConfig `
+                    -RepairExactPackage:$repairExactPackage `
+                    -FailureDetail ([ref]$installFailureDetail)
             }
             catch {
                 $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Installer invocation failure.'
@@ -2523,7 +2808,8 @@ function Install-OpenClawOfficial {
                 throw
             }
             if ($installExitCode -ne 0) {
-                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail ("Exit code {0}" -f $installExitCode)
+                $installCheckpointDetail = Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode $installExitCode -FailureDetail $installFailureDetail
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail $installCheckpointDetail
                 throw (New-OpenClawTaggedException -Kind 'Install' -Message "The pinned OpenClaw installer failed with exit code $installExitCode.")
             }
 
