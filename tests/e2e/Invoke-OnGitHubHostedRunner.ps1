@@ -8,6 +8,7 @@ $startedAtUtc = [DateTime]::UtcNow
 $resultPath = $null
 $resultWritten = $false
 $invocation = $null
+$harnessPhase = 'preflight'
 $result = [ordered]@{
     schemaVersion = 1
     startedAtUtc = $startedAtUtc.ToString('o')
@@ -104,6 +105,45 @@ function Get-OpenClawE2ESafeErrorCode {
     return ''
 }
 
+function Get-OpenClawE2EUnknownHarnessCode {
+    param(
+        [AllowEmptyString()]
+        [string]$Phase
+    )
+
+    switch -CaseSensitive ($Phase) {
+        'preflight' { return 'E2E-HARNESS-PREFLIGHT-001' }
+        'paths' { return 'E2E-HARNESS-PATHS-001' }
+        'source' { return 'E2E-HARNESS-SOURCE-001' }
+        'environment' { return 'E2E-HARNESS-ENVIRONMENT-001' }
+        'installer' { return 'E2E-HARNESS-INSTALLER-001' }
+        'checkpoint' { return 'E2E-HARNESS-CHECKPOINT-001' }
+        'provenance' { return 'E2E-HARNESS-PROVENANCE-001' }
+        'slack' { return 'E2E-HARNESS-SLACK-001' }
+        'postconditions' { return 'E2E-HARNESS-POSTCONDITIONS-001' }
+        default { return 'E2E-HARNESS-001' }
+    }
+}
+
+function Resolve-OpenClawE2EHarnessErrorCode {
+    param(
+        [AllowEmptyString()]
+        [string]$CandidateCode,
+
+        [AllowEmptyString()]
+        [string]$Phase,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SafeCodes
+    )
+
+    foreach ($safeCode in $SafeCodes) {
+        if ([string]::Equals($CandidateCode, $safeCode, [StringComparison]::Ordinal)) {
+            return $CandidateCode
+        }
+    }
+    return Get-OpenClawE2EUnknownHarnessCode -Phase $Phase
+}
 function Get-OpenClawE2ECheckpointEvidence {
     param(
         [Parameter(Mandatory = $true)]
@@ -335,7 +375,16 @@ $safeHarnessCodes = @(
     'E2E-TRUSTED-POWERSHELL-MISSING',
     'E2E-CHECKPOINT-INVALID',
     'E2E-SLACK-VERIFICATION-FAILED',
-    'E2E-RESULT-PERSISTENCE-FAILED'
+    'E2E-RESULT-PERSISTENCE-FAILED',
+    'E2E-HARNESS-PREFLIGHT-001',
+    'E2E-HARNESS-PATHS-001',
+    'E2E-HARNESS-SOURCE-001',
+    'E2E-HARNESS-ENVIRONMENT-001',
+    'E2E-HARNESS-INSTALLER-001',
+    'E2E-HARNESS-CHECKPOINT-001',
+    'E2E-HARNESS-PROVENANCE-001',
+    'E2E-HARNESS-SLACK-001',
+    'E2E-HARNESS-POSTCONDITIONS-001'
 )
 
 try {
@@ -355,6 +404,7 @@ try {
     }
     $result.testedCommit = $testedCommit
 
+    $harnessPhase = 'paths'
 
     $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
     $workspaceRoot = [IO.Path]::GetFullPath([string]$env:GITHUB_WORKSPACE)
@@ -407,6 +457,7 @@ try {
         $emptyStream.Dispose()
     }
 
+    $harnessPhase = 'source'
     $stagedFiles = @(
         'OpenClawEasySetup.ps1',
         'config\openclaw-source.json',
@@ -465,6 +516,7 @@ try {
         throw 'E2E-SOURCE-INVALID'
     }
     Import-Module -Name $modulePath -Force -ErrorAction Stop
+    $harnessPhase = 'environment'
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -491,6 +543,7 @@ try {
         -GitConfigPath $gitConfigPath
     $result.credentialsScrubbed = $true
 
+    $harnessPhase = 'installer'
     $process = Start-Process -FilePath $trustedPowerShell -ArgumentList @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', ('"{0}"' -f $workerPath),
@@ -505,6 +558,7 @@ try {
         }
     }
 
+    $harnessPhase = 'checkpoint'
     Assert-OpenClawE2EStagedSource -SourceRoot $sourceRoot -RelativePaths $stagedFiles -ExpectedHashes $stagedHashes
 
     $checkpointEvidence = $null
@@ -516,7 +570,7 @@ try {
     }
     catch {
         if ($result.installerExitCode -eq 0) {
-            throw
+            throw 'E2E-CHECKPOINT-INVALID'
         }
     }
     if ($null -ne $checkpointEvidence) {
@@ -524,6 +578,7 @@ try {
         $result.installationSucceeded = [bool]$checkpointEvidence.MatchesExpected
     }
 
+    $harnessPhase = 'provenance'
     if ($result.installerExitCode -eq 0) {
     try {
         Update-OpenClawProcessPath
@@ -552,9 +607,13 @@ try {
         $result.installedVersion = ''
         $result.provenanceReceiptValidated = $false
         $invocation = $null
+        if ([string]::IsNullOrWhiteSpace([string]$result.errorCode)) {
+            $result.errorCode = 'E2E-HARNESS-PROVENANCE-001'
+        }
     }
     }
 
+    $harnessPhase = 'slack'
     if ($null -ne $invocation -and $result.provenanceReceiptValidated) {
         try {
             $validatedPlugin = Get-OpenClawSlackPluginInspection -Invocation $invocation -SourceConfig $sourceConfig
@@ -562,9 +621,13 @@ try {
         }
         catch {
             $result.slackPluginVerified = $false
+            if ([string]::IsNullOrWhiteSpace([string]$result.errorCode)) {
+                $result.errorCode = 'E2E-SLACK-VERIFICATION-FAILED'
+            }
         }
     }
 
+    $harnessPhase = 'postconditions'
     $result.harnessCompleted = $true
     $result.success = $result.installerExitCode -eq 0 -and
         $result.environmentVerified -and
@@ -579,7 +642,7 @@ try {
 }
 catch {
     $candidateCode = [string]$_.Exception.Message
-    $result.errorCode = if ($candidateCode -in $safeHarnessCodes) { $candidateCode } else { 'E2E-HARNESS-001' }
+    $result.errorCode = Resolve-OpenClawE2EHarnessErrorCode -CandidateCode $candidateCode -Phase $harnessPhase -SafeCodes $safeHarnessCodes
     $result.success = $false
 }
 finally {
@@ -599,6 +662,7 @@ finally {
     $statusText = if ($result.success -and $resultWritten) { 'PASS' } else { 'FAIL' }
     Write-Host ("Windows install E2E: {0}" -f $statusText)
     Write-Host ("Target version: {0}" -f $result.targetVersion)
+    Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)
     if (-not $result.success) {
         Write-Host ("Safe error code: {0}" -f $result.errorCode)
     }
