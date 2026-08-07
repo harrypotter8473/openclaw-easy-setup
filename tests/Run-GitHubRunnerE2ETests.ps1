@@ -220,6 +220,9 @@ $installProducerPatterns = @(
     '-StepId ''install'' -Status ''Failed'' -Detail ''Provenance receipt failure.''',
     '$installFailureDetail = ''''',
     '-FailureDetail ([ref]$installFailureDetail)',
+    '$diagnosticStage = ''''',
+    '-DiagnosticStage ([ref]$diagnosticStage)',
+    '$FailureDetail.Value = Resolve-OpenClawPinnedInstallerFailureDetail',
     'Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode $installExitCode -FailureDetail $installFailureDetail',
     '-StepId ''install'' -Status ''Failed'' -Detail $installCheckpointDetail'
 )
@@ -227,7 +230,7 @@ $installProducerMatchCounts = @($installProducerPatterns | ForEach-Object {
     ([regex]::Matches($module, [regex]::Escape($_))).Count
 })
 $slackProducerPattern = '-StepId ''install'' -Status ''Failed'' -Detail ''Slack plugin provenance or installation failure.'''
-Assert-True -Condition (($installProducerMatchCounts -join ',') -eq '1,1,1,1,1,1,1' -and
+Assert-True -Condition (($installProducerMatchCounts -join ',') -eq '1,1,1,1,1,1,1,1,1,1' -and
     ([regex]::Matches($module, [regex]::Escape($slackProducerPattern))).Count -eq 2) -Name 'Install checkpoint producers retain the exact classifier detail contract'
 Assert-True -Condition ($controller.Contains('Get-OpenClawE2EPostconditionErrorCode -Result $result') -and
     $controller.Contains('E2E-POSTCONDITION-INSTALLATION-FAILED') -and
@@ -594,9 +597,13 @@ $installFailureCaseSource = @(
     '    ''Npm dependency resolution failure.'',',
     '    ''Npm registry authentication failure.'',',
     '    ''Npm TLS failure.'',',
-    '    ''Npm protocol failure.''',
+    '    ''Npm protocol failure.'',',
+    '    ''Npm diagnostics unavailable.'',',
+    '    ''Npm diagnostic file rejected.'',',
+    '    ''Npm install log missing or ambiguous.'',',
+    '    ''Npm failure evidence unclassified.''',
     ')',
-    '$unknownDetails = @('''', ''Exit code 3'', ''installer invocation failure.'', (''Exit code 1'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''), (''Slack plugin provenance or installation failure.'' + [Environment]::NewLine + ''token''), (''Npm network failure.'' + [Environment]::NewLine + ''npm_token=synthetic''))',
+    '$unknownDetails = @('''', ''Exit code 3'', ''installer invocation failure.'', (''Exit code 1'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''), (''Slack plugin provenance or installation failure.'' + [Environment]::NewLine + ''token''), (''Npm network failure.'' + [Environment]::NewLine + ''npm_token=synthetic''), (''Npm diagnostics unavailable.'' + [Environment]::NewLine + ''token''))',
     '[pscustomobject]@{',
     '    KnownCodes = @($knownDetails | ForEach-Object { Get-OpenClawE2EInstallFailureCode -Detail $_ })',
     '    UnknownCodes = @($unknownDetails | ForEach-Object { Get-OpenClawE2EInstallFailureCode -Detail $_ })',
@@ -621,9 +628,13 @@ $expectedInstallFailureCodes = @(
     'E2E-INSTALL-NPM-DEPENDENCY-RESOLUTION-FAILED',
     'E2E-INSTALL-NPM-REGISTRY-AUTH-FAILED',
     'E2E-INSTALL-NPM-TLS-FAILED',
-    'E2E-INSTALL-NPM-PROTOCOL-FAILED'
+    'E2E-INSTALL-NPM-PROTOCOL-FAILED',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-UNAVAILABLE',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-FILE-REJECTED',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-LOG-MISSING-OR-AMBIGUOUS',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-EVIDENCE-UNCLASSIFIED'
 )
-Assert-True -Condition (($installFailureEvidence.KnownCodes -join ',') -eq ($expectedInstallFailureCodes -join ',')) -Name 'Exact validated install details map to fixed causal codes'
+Assert-True -Condition (($installFailureEvidence.KnownCodes -join ',') -eq ($expectedInstallFailureCodes -join ',')) -Name 'Exact validated install details map to fixed causal or diagnostic codes'
 Assert-True -Condition (@($installFailureEvidence.UnknownCodes | Where-Object { $_ -ne 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH' }).Count -eq 0) -Name 'Unknown or malformed install details collapse to the generic install mismatch code'
 $safeInstallAssignments = @($controllerAst.FindAll({
     param($node)
