@@ -216,15 +216,18 @@ Assert-True -Condition ($controller.Contains('Get-OpenClawE2EInstallFailureCode'
     $controller.Contains('E2E-INSTALL-SLACK-PLUGIN-FAILED')) -Name 'Validated install details can refine only allowlisted checkpoint diagnostics'
 $installProducerPatterns = @(
     '-StepId ''install'' -Status ''Failed'' -Detail ''Installer invocation failure.''',
-    '-StepId ''install'' -Status ''Failed'' -Detail ("Exit code {0}" -f $installExitCode)',
     '-StepId ''install'' -Status ''Failed'' -Detail ''Postcondition failure.''',
-    '-StepId ''install'' -Status ''Failed'' -Detail ''Provenance receipt failure.'''
+    '-StepId ''install'' -Status ''Failed'' -Detail ''Provenance receipt failure.''',
+    '$installFailureDetail = ''''',
+    '-FailureDetail ([ref]$installFailureDetail)',
+    'Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode $installExitCode -FailureDetail $installFailureDetail',
+    '-StepId ''install'' -Status ''Failed'' -Detail $installCheckpointDetail'
 )
 $installProducerMatchCounts = @($installProducerPatterns | ForEach-Object {
     ([regex]::Matches($module, [regex]::Escape($_))).Count
 })
 $slackProducerPattern = '-StepId ''install'' -Status ''Failed'' -Detail ''Slack plugin provenance or installation failure.'''
-Assert-True -Condition (($installProducerMatchCounts -join ',') -eq '1,1,1,1' -and
+Assert-True -Condition (($installProducerMatchCounts -join ',') -eq '1,1,1,1,1,1,1' -and
     ([regex]::Matches($module, [regex]::Escape($slackProducerPattern))).Count -eq 2) -Name 'Install checkpoint producers retain the exact classifier detail contract'
 Assert-True -Condition ($controller.Contains('Get-OpenClawE2EPostconditionErrorCode -Result $result') -and
     $controller.Contains('E2E-POSTCONDITION-INSTALLATION-FAILED') -and
@@ -353,6 +356,51 @@ Assert-True -Condition ($pathEvidenceValid -and $pathEvidence.ToolcacheCode -eq 
 Assert-True -Condition ($pathEvidenceValid -and $pathEvidence.BlockedCode -eq 'E2E-PATH-EXPANSION-INVALID') -Name 'Expanded PATH guard still rejects paths inside mutable runner roots'
 
 
+$safeErrorSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2ESafeErrorCode'
+$safeErrorCaseSource = @(
+    'param([string]$CaseRoot)',
+    $safeErrorSource,
+    '$encoding = New-Object Text.UTF8Encoding($false)',
+    '$legacyEncoding = [Text.Encoding]::GetEncoding(949)',
+    '$errorCodeLabel = ([string][char]0xC624) + ([char]0xB958) + '' '' + ([char]0xCF54) + ([char]0xB4DC)',
+    '$exactPath = Join-Path $CaseRoot ''exact.txt''',
+    '$otherPath = Join-Path $CaseRoot ''other.txt''',
+    '$duplicatePath = Join-Path $CaseRoot ''duplicate.txt''',
+    '$embeddedPath = Join-Path $CaseRoot ''embedded.txt''',
+    '$unknownPath = Join-Path $CaseRoot ''unknown.txt''',
+    '$legacyPath = Join-Path $CaseRoot ''legacy.txt''',
+    '[IO.File]::WriteAllText($exactPath, (''noise'' + [Environment]::NewLine + $errorCodeLabel + '': OCES-INSTALL-001'' + [Environment]::NewLine), $encoding)',
+    '[IO.File]::WriteAllText($otherPath, ($errorCodeLabel + '': OCES-INTEGRITY-001'' + [Environment]::NewLine), $encoding)',
+    '[IO.File]::WriteAllText($duplicatePath, ($errorCodeLabel + '': OCES-INSTALL-001'' + [Environment]::NewLine), $encoding)',
+    '[IO.File]::WriteAllText($embeddedPath, (''npm says '' + $errorCodeLabel + '': OCES-DOWNLOAD-001 trailing'' + [Environment]::NewLine + ''OCES-PREREQ-001''), $encoding)',
+    '[IO.File]::WriteAllText($unknownPath, ($errorCodeLabel + '': OCES-FAKE-999'' + [Environment]::NewLine), $encoding)',
+    '[IO.File]::WriteAllText($legacyPath, ($errorCodeLabel + '': OCES-INSTALL-001'' + [Environment]::NewLine), $legacyEncoding)',
+    '[pscustomobject]@{',
+    '    Exact = Get-OpenClawE2ESafeErrorCode -Paths @($exactPath)',
+    '    Duplicate = Get-OpenClawE2ESafeErrorCode -Paths @($exactPath, $duplicatePath)',
+    '    Ambiguous = Get-OpenClawE2ESafeErrorCode -Paths @($exactPath, $otherPath)',
+    '    Embedded = Get-OpenClawE2ESafeErrorCode -Paths @($embeddedPath)',
+    '    Unknown = Get-OpenClawE2ESafeErrorCode -Paths @($unknownPath)',
+    '    Legacy = Get-OpenClawE2ESafeErrorCode -Paths @($legacyPath)',
+    '}'
+) -join [Environment]::NewLine
+$safeErrorCaseRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('OpenClawE2ESafeErrorTest-' + [guid]::NewGuid().ToString('N'))))
+$safeErrorTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$safeErrorEvidence = $null
+try {
+    [void][IO.Directory]::CreateDirectory($safeErrorCaseRoot)
+    $safeErrorEvidence = & ([scriptblock]::Create($safeErrorCaseSource)) $safeErrorCaseRoot
+}
+finally {
+    if ([IO.Directory]::Exists($safeErrorCaseRoot) -and $safeErrorCaseRoot.StartsWith($safeErrorTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [IO.Directory]::Delete($safeErrorCaseRoot, $true)
+    }
+}
+Assert-True -Condition ($safeErrorEvidence.Exact -eq 'OCES-INSTALL-001' -and $safeErrorEvidence.Duplicate -eq 'OCES-INSTALL-001') -Name 'UTF-8 installer output yields a code only from duplicate-safe exact allowlisted lines'
+Assert-True -Condition ([string]::IsNullOrWhiteSpace([string]$safeErrorEvidence.Ambiguous) -and
+    [string]::IsNullOrWhiteSpace([string]$safeErrorEvidence.Embedded) -and
+    [string]::IsNullOrWhiteSpace([string]$safeErrorEvidence.Unknown) -and
+    [string]::IsNullOrWhiteSpace([string]$safeErrorEvidence.Legacy)) -Name 'Ambiguous, embedded, unknown, or legacy-encoded OCES output fails closed'
 $unknownHarnessSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2EUnknownHarnessCode'
 $resolveHarnessSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Resolve-OpenClawE2EHarnessErrorCode'
 $selectCheckpointSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Select-OpenClawE2ECheckpointErrorCode'
@@ -370,7 +418,10 @@ $resolverCaseSource = @(
     '    EmptyCurrentSpecific = Select-OpenClawE2ECheckpointErrorCode -CurrentCode '''' -CandidateCode ''E2E-INSTALL-SLACK-PLUGIN-FAILED'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
     '    BroadCurrentSpecific = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''OCES-INSTALL-001'' -CandidateCode ''E2E-INSTALL-SLACK-PLUGIN-FAILED'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
     '    BroadCurrentGeneric = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''OCES-INSTALL-001'' -CandidateCode ''E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
-    '    OtherCurrentSpecific = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''OCES-INTEGRITY-001'' -CandidateCode ''E2E-INSTALL-SLACK-PLUGIN-FAILED'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
+    '    GenericCurrentSpecific = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''E2E-INSTALLER-FAILED'' -CandidateCode ''E2E-INSTALL-SLACK-PLUGIN-FAILED'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
+    '    GenericCurrentGeneric = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''E2E-INSTALLER-FAILED'' -CandidateCode ''E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
+    '    GenericCurrentWrongCase = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''E2E-INSTALLER-FAILED'' -CandidateCode ''e2e-install-slack-plugin-failed'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
+    '    GenericCurrentMalicious = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''E2E-INSTALLER-FAILED'' -CandidateCode (''E2E-INSTALL-SLACK-PLUGIN-FAILED'' + [Environment]::NewLine + ''token'') -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',    '    OtherCurrentSpecific = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''OCES-INTEGRITY-001'' -CandidateCode ''E2E-INSTALL-SLACK-PLUGIN-FAILED'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
     '    WrongCaseSelection = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''OCES-INSTALL-001'' -CandidateCode ''e2e-install-slack-plugin-failed'' -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
     '    MaliciousSelection = Select-OpenClawE2ECheckpointErrorCode -CurrentCode ''OCES-INSTALL-001'' -CandidateCode (''E2E-INSTALL-SLACK-PLUGIN-FAILED'' + [Environment]::NewLine + ''token'') -SafeCodes $safeCodes -SpecificInstallCodes $specificInstallCodes',
     '}'
@@ -394,10 +445,13 @@ Assert-True -Condition ($resolverEvidence.ExactSafe -eq 'E2E-CHECKPOINT-INVALID'
 Assert-True -Condition ($resolverEvidence.EmptyCurrentSpecific -eq 'E2E-INSTALL-SLACK-PLUGIN-FAILED' -and
     $resolverEvidence.BroadCurrentSpecific -eq 'E2E-INSTALL-SLACK-PLUGIN-FAILED' -and
     $resolverEvidence.BroadCurrentGeneric -eq 'OCES-INSTALL-001' -and
+    $resolverEvidence.GenericCurrentSpecific -eq 'E2E-INSTALL-SLACK-PLUGIN-FAILED' -and
+    $resolverEvidence.GenericCurrentGeneric -eq 'E2E-INSTALLER-FAILED' -and
+    $resolverEvidence.GenericCurrentWrongCase -eq 'E2E-INSTALLER-FAILED' -and
+    $resolverEvidence.GenericCurrentMalicious -eq 'E2E-INSTALLER-FAILED' -and
     $resolverEvidence.OtherCurrentSpecific -eq 'OCES-INTEGRITY-001' -and
     $resolverEvidence.WrongCaseSelection -eq 'OCES-INSTALL-001' -and
-    $resolverEvidence.MaliciousSelection -eq 'OCES-INSTALL-001') -Name 'Checkpoint selection refines only the broad install code with an exact allowlisted cause'
-
+    $resolverEvidence.MaliciousSelection -eq 'OCES-INSTALL-001') -Name 'Checkpoint selection refines only broad or generic installer failures with an exact allowlisted cause'
 $postconditionSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2EPostconditionErrorCode'
 $postconditionCaseSource = @(
     $postconditionSource,
@@ -522,8 +576,27 @@ $successfulStages = @(
 $installFailureSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2EInstallFailureCode'
 $installFailureCaseSource = @(
     $installFailureSource,
-    '$knownDetails = @(''Installer invocation failure.'', ''Exit code 1'', ''Exit code 2'', ''Postcondition failure.'', ''Provenance receipt failure.'', ''Slack plugin provenance or installation failure.'')',
-    '$unknownDetails = @('''', ''Exit code 3'', ''installer invocation failure.'', (''Exit code 1'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''), (''Slack plugin provenance or installation failure.'' + [Environment]::NewLine + ''token''))',
+    '$knownDetails = @(',
+    '    ''Installer invocation failure.'',',
+    '    ''Exit code 1'',',
+    '    ''Exit code 2'',',
+    '    ''Postcondition failure.'',',
+    '    ''Provenance receipt failure.'',',
+    '    ''Slack plugin provenance or installation failure.'',',
+    '    ''Npm permission failure.'',',
+    '    ''Npm disk capacity failure.'',',
+    '    ''Npm network failure.'',',
+    '    ''Npm package target failure.'',',
+    '    ''Npm engine incompatibility.'',',
+    '    ''Npm integrity failure.'',',
+    '    ''Npm lifecycle failure.'',',
+    '    ''Npm filesystem failure.'',',
+    '    ''Npm dependency resolution failure.'',',
+    '    ''Npm registry authentication failure.'',',
+    '    ''Npm TLS failure.'',',
+    '    ''Npm protocol failure.''',
+    ')',
+    '$unknownDetails = @('''', ''Exit code 3'', ''installer invocation failure.'', (''Exit code 1'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''), (''Slack plugin provenance or installation failure.'' + [Environment]::NewLine + ''token''), (''Npm network failure.'' + [Environment]::NewLine + ''npm_token=synthetic''))',
     '[pscustomobject]@{',
     '    KnownCodes = @($knownDetails | ForEach-Object { Get-OpenClawE2EInstallFailureCode -Detail $_ })',
     '    UnknownCodes = @($unknownDetails | ForEach-Object { Get-OpenClawE2EInstallFailureCode -Detail $_ })',
@@ -536,7 +609,19 @@ $expectedInstallFailureCodes = @(
     'E2E-INSTALL-PINNED-INSTALLER-EXIT-2',
     'E2E-INSTALL-POSTCONDITION-FAILED',
     'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED',
-    'E2E-INSTALL-SLACK-PLUGIN-FAILED'
+    'E2E-INSTALL-SLACK-PLUGIN-FAILED',
+    'E2E-INSTALL-NPM-PERMISSION-FAILED',
+    'E2E-INSTALL-NPM-DISK-CAPACITY-FAILED',
+    'E2E-INSTALL-NPM-NETWORK-FAILED',
+    'E2E-INSTALL-NPM-PACKAGE-UNAVAILABLE',
+    'E2E-INSTALL-NPM-ENGINE-INCOMPATIBLE',
+    'E2E-INSTALL-NPM-INTEGRITY-FAILED',
+    'E2E-INSTALL-NPM-LIFECYCLE-FAILED',
+    'E2E-INSTALL-NPM-FILESYSTEM-FAILED',
+    'E2E-INSTALL-NPM-DEPENDENCY-RESOLUTION-FAILED',
+    'E2E-INSTALL-NPM-REGISTRY-AUTH-FAILED',
+    'E2E-INSTALL-NPM-TLS-FAILED',
+    'E2E-INSTALL-NPM-PROTOCOL-FAILED'
 )
 Assert-True -Condition (($installFailureEvidence.KnownCodes -join ',') -eq ($expectedInstallFailureCodes -join ',')) -Name 'Exact validated install details map to fixed causal codes'
 Assert-True -Condition (@($installFailureEvidence.UnknownCodes | Where-Object { $_ -ne 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH' }).Count -eq 0) -Name 'Unknown or malformed install details collapse to the generic install mismatch code'
@@ -666,7 +751,7 @@ try {
         $checkpointEvidence = & ([scriptblock]::Create($checkpointCaseSource)) $checkpointCaseRoot $successfulStages 'Completed'
         $integrationSteps = @($successfulStages | ForEach-Object { [pscustomobject]@{ id = [string]$_.id; status = [string]$_.status; detail = '' } })
         $integrationSteps[5].status = 'Failed'
-        $integrationSteps[5].detail = 'Slack plugin provenance or installation failure.'
+        $integrationSteps[5].detail = 'Npm filesystem failure.'
         $checkpointMismatchIntegrationEvidence = & ([scriptblock]::Create($checkpointCaseSource)) $checkpointCaseRoot $integrationSteps 'Failed'
     }
     catch {
@@ -679,7 +764,7 @@ finally {
     }
 }
 Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointEvidence -and @($checkpointEvidence.Stages).Count -eq 8 -and $checkpointEvidence.MatchesExpected -and [string]::IsNullOrWhiteSpace([string]$checkpointEvidence.FailureCode)) -Name 'PowerShell 5.1 returns all eight checkpoint stages without Generic List conversion failure'
-Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointMismatchIntegrationEvidence -and -not $checkpointMismatchIntegrationEvidence.MatchesExpected -and $checkpointMismatchIntegrationEvidence.FailureCode -eq 'E2E-INSTALL-SLACK-PLUGIN-FAILED') -Name 'Checkpoint evidence carries only the fixed causal install code'
+Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointMismatchIntegrationEvidence -and -not $checkpointMismatchIntegrationEvidence.MatchesExpected -and $checkpointMismatchIntegrationEvidence.FailureCode -eq 'E2E-INSTALL-NPM-FILESYSTEM-FAILED') -Name 'Checkpoint evidence carries only the fixed causal npm install code'
 Assert-True -Condition (@($checkpointMismatchIntegrationEvidence.Stages | Where-Object { $null -ne $_.PSObject.Properties['detail'] }).Count -eq 0) -Name 'Published checkpoint stages omit raw detail even when it supplied a fixed classifier code'
 $successReceipt = [ordered]@{
     schemaVersion = 1

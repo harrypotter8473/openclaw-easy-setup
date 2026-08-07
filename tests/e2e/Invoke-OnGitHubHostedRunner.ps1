@@ -87,20 +87,48 @@ function Get-OpenClawE2ESafeErrorCode {
         [string[]]$Paths
     )
 
+    $safeCodes = @(
+        'OCES-BUNDLE-001',
+        'OCES-BUNDLE-LOG-001',
+        'OCES-CANCELLED-001',
+        'OCES-CONFIG-001',
+        'OCES-DIAG-001',
+        'OCES-DOWNLOAD-001',
+        'OCES-INSTALL-001',
+        'OCES-INTEGRITY-001',
+        'OCES-PREREQ-001',
+        'OCES-RESUME-001',
+        'OCES-SETTINGS-PARTIAL-042',
+        'OCES-UNEXPECTED-001',
+        'OCES-VERIFY-001'
+    )
+    $foundCodes = @{}
     foreach ($path in $Paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             continue
         }
-        $item = Get-Item -LiteralPath $path -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $item.Length -le 0 -or $item.Length -gt 2MB) {
+        try {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $item.Length -le 0 -or $item.Length -gt 2MB) {
+                continue
+            }
+            foreach ($line in @(Get-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop)) {
+                if ([string]$line -cmatch '^\uC624\uB958 \uCF54\uB4DC: (?<code>OCES-[A-Z-]+-[0-9]{3})$') {
+                    $candidateCode = [string]$Matches['code']
+                    if ($safeCodes -cnotcontains $candidateCode) {
+                        return ''
+                    }
+                    $foundCodes[$candidateCode] = $true
+                }
+            }
+        }
+        catch {
             continue
         }
-        $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-        $match = [regex]::Match([string]$text, 'OCES-[A-Z-]+-[0-9]{3}')
-        if ($match.Success) {
-            return $match.Value
-        }
+    }
+    if ($foundCodes.Count -eq 1) {
+        return [string]@($foundCodes.Keys)[0]
     }
     return ''
 }
@@ -169,7 +197,8 @@ function Select-OpenClawE2ECheckpointErrorCode {
         return $resolvedCode
     }
 
-    if ([string]::Equals($CurrentCode, 'OCES-INSTALL-001', [StringComparison]::Ordinal) -and
+    if (([string]::Equals($CurrentCode, 'OCES-INSTALL-001', [StringComparison]::Ordinal) -or
+        [string]::Equals($CurrentCode, 'E2E-INSTALLER-FAILED', [StringComparison]::Ordinal)) -and
         $SpecificInstallCodes -ccontains $resolvedCode) {
         return $resolvedCode
     }
@@ -213,6 +242,18 @@ function Get-OpenClawE2EInstallFailureCode {
         'Postcondition failure.' { return 'E2E-INSTALL-POSTCONDITION-FAILED' }
         'Provenance receipt failure.' { return 'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED' }
         'Slack plugin provenance or installation failure.' { return 'E2E-INSTALL-SLACK-PLUGIN-FAILED' }
+        'Npm permission failure.' { return 'E2E-INSTALL-NPM-PERMISSION-FAILED' }
+        'Npm disk capacity failure.' { return 'E2E-INSTALL-NPM-DISK-CAPACITY-FAILED' }
+        'Npm network failure.' { return 'E2E-INSTALL-NPM-NETWORK-FAILED' }
+        'Npm package target failure.' { return 'E2E-INSTALL-NPM-PACKAGE-UNAVAILABLE' }
+        'Npm engine incompatibility.' { return 'E2E-INSTALL-NPM-ENGINE-INCOMPATIBLE' }
+        'Npm integrity failure.' { return 'E2E-INSTALL-NPM-INTEGRITY-FAILED' }
+        'Npm lifecycle failure.' { return 'E2E-INSTALL-NPM-LIFECYCLE-FAILED' }
+        'Npm filesystem failure.' { return 'E2E-INSTALL-NPM-FILESYSTEM-FAILED' }
+        'Npm dependency resolution failure.' { return 'E2E-INSTALL-NPM-DEPENDENCY-RESOLUTION-FAILED' }
+        'Npm registry authentication failure.' { return 'E2E-INSTALL-NPM-REGISTRY-AUTH-FAILED' }
+        'Npm TLS failure.' { return 'E2E-INSTALL-NPM-TLS-FAILED' }
+        'Npm protocol failure.' { return 'E2E-INSTALL-NPM-PROTOCOL-FAILED' }
         default { return 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH' }
     }
 }
@@ -470,7 +511,19 @@ $safeInstallFailureCodes = @(
     'E2E-INSTALL-PINNED-INSTALLER-EXIT-2',
     'E2E-INSTALL-POSTCONDITION-FAILED',
     'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED',
-    'E2E-INSTALL-SLACK-PLUGIN-FAILED'
+    'E2E-INSTALL-SLACK-PLUGIN-FAILED',
+    'E2E-INSTALL-NPM-PERMISSION-FAILED',
+    'E2E-INSTALL-NPM-DISK-CAPACITY-FAILED',
+    'E2E-INSTALL-NPM-NETWORK-FAILED',
+    'E2E-INSTALL-NPM-PACKAGE-UNAVAILABLE',
+    'E2E-INSTALL-NPM-ENGINE-INCOMPATIBLE',
+    'E2E-INSTALL-NPM-INTEGRITY-FAILED',
+    'E2E-INSTALL-NPM-LIFECYCLE-FAILED',
+    'E2E-INSTALL-NPM-FILESYSTEM-FAILED',
+    'E2E-INSTALL-NPM-DEPENDENCY-RESOLUTION-FAILED',
+    'E2E-INSTALL-NPM-REGISTRY-AUTH-FAILED',
+    'E2E-INSTALL-NPM-TLS-FAILED',
+    'E2E-INSTALL-NPM-PROTOCOL-FAILED'
 )
 
 $safeHarnessCodes = @(
