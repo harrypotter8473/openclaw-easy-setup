@@ -1,0 +1,336 @@
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    x:Name="SettingsWindow"
+    Width="900"
+    Height="760"
+    MinWidth="520"
+    MinHeight="320"
+    WindowStartupLocation="CenterScreen"
+    UseLayoutRounding="True"
+    SnapsToDevicePixels="True"
+    Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+    Foreground="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"
+    Title="OpenClaw 쉬운 설정 마법사">
+    <Window.Resources>
+        <Style TargetType="{x:Type Button}">
+            <Setter Property="MinHeight" Value="42" />
+            <Setter Property="Padding" Value="16,9" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style TargetType="{x:Type CheckBox}">
+            <Setter Property="Padding" Value="4" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+        </Style>
+        <Style TargetType="{x:Type ComboBox}">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+        </Style>
+        <Style TargetType="{x:Type PasswordBox}">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+        </Style>
+        <Style TargetType="{x:Type TextBox}">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+        </Style>
+        <Style x:Key="SectionBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Margin" Value="0,0,0,16" />
+            <Setter Property="Padding" Value="20" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+        </Style>
+        <Style x:Key="HeadingTextStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="FontSize" Value="20" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="BodyTextStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="FieldLabelStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="Margin" Value="0,12,0,5" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border
+            Grid.Row="0"
+            Padding="24,18"
+            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+            BorderThickness="0,0,0,1">
+            <StackPanel>
+                <TextBlock
+                    FontSize="26"
+                    FontWeight="SemiBold"
+                    Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                    Text="OpenClaw 쉬운 설정 마법사"
+                    TextWrapping="Wrap" />
+                <TextBlock
+                    Margin="0,5,0,0"
+                    Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                    Text="AI 모델과 메시지 채널을 안전한 기본값으로 설정합니다. 비밀값은 미리보기나 명령줄에 표시되지 않습니다."
+                    TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+
+        <ScrollViewer
+            x:Name="MainScrollViewer"
+            Grid.Row="1"
+            Padding="24"
+            HorizontalScrollBarVisibility="Disabled"
+            VerticalScrollBarVisibility="Auto"
+            CanContentScroll="False"
+            Focusable="False">
+            <StackPanel x:Name="SettingsContentPanel" MaxWidth="940">
+                <Border Style="{StaticResource SectionBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource HeadingTextStyle}" Text="1. AI 모델" />
+                        <TextBlock
+                            Margin="0,6,0,4"
+                            Style="{StaticResource BodyTextStyle}"
+                            Text="Easy Setup 0.4에서 검토한 모델만 선택할 수 있으며 적용 전 공식 dry-run으로 다시 확인합니다."
+                            TextWrapping="Wrap" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="제공자" />
+                        <ComboBox
+                            x:Name="ProviderComboBox"
+                            DisplayMemberPath="Label"
+                            SelectedValuePath="Id"
+                            TabIndex="10"
+                            AutomationProperties.Name="AI 제공자 선택" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="모델" />
+                        <ComboBox
+                            x:Name="ModelComboBox"
+                            DisplayMemberPath="Label"
+                            SelectedValuePath="Id"
+                            TabIndex="11"
+                            AutomationProperties.Name="AI 모델 선택" />
+
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="API 키" />
+                        <PasswordBox
+                            x:Name="ApiKeyPasswordBox"
+                            MaxLength="2560"
+                            TabIndex="12"
+                            AutomationProperties.Name="AI 제공자 API 키 입력"
+                            AutomationProperties.HelpText="API 키는 미리보기, 로그, 파일 또는 프로세스 명령줄에 기록되지 않습니다." />
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource SectionBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource HeadingTextStyle}" Text="2. 메시지 채널 (선택)" />
+                        <TextBlock
+                            Margin="0,6,0,10"
+                            Style="{StaticResource BodyTextStyle}"
+                            Text="Slack을 먼저 지원합니다. 처음에는 개인 메시지 페어링만 허용하고, 그룹 사용과 채널의 설정 변경 기능은 끕니다."
+                            TextWrapping="Wrap" />
+
+                        <CheckBox
+                            x:Name="SlackCheckBox"
+                            Content="Slack 사용 (권장)"
+                            IsChecked="False"
+                            IsThreeState="False"
+                            TabIndex="20"
+                            AutomationProperties.Name="Slack 채널 사용" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Slack Bot User OAuth Token (xoxb-)" />
+                        <PasswordBox
+                            x:Name="SlackBotTokenPasswordBox"
+                            IsEnabled="False"
+                            MaxLength="2560"
+                            TabIndex="21"
+                            AutomationProperties.Name="Slack Bot User OAuth Token 입력"
+                            AutomationProperties.HelpText="Slack 앱의 xoxb- Bot User OAuth Token입니다. 화면이나 로그에 표시되지 않습니다." />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Slack App-Level Token (xapp-)" />
+                        <PasswordBox
+                            x:Name="SlackAppTokenPasswordBox"
+                            IsEnabled="False"
+                            MaxLength="2560"
+                            TabIndex="22"
+                            AutomationProperties.Name="Slack App-Level Token 입력"
+                            AutomationProperties.HelpText="Socket Mode와 connections:write 권한을 가진 xapp- App-Level Token입니다. 화면이나 로그에 표시되지 않습니다." />
+
+                        <CheckBox
+                            x:Name="TelegramCheckBox"
+                            Margin="0,16,0,0"
+                            Content="Telegram 사용"
+                            IsChecked="False"
+                            IsThreeState="False"
+                            TabIndex="23"
+                            AutomationProperties.Name="Telegram 채널 사용" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Telegram 봇 토큰" />
+                        <PasswordBox
+                            x:Name="TelegramTokenPasswordBox"
+                            IsEnabled="False"
+                            MaxLength="2560"
+                            TabIndex="24"
+                            AutomationProperties.Name="Telegram 봇 토큰 입력"
+                            AutomationProperties.HelpText="Telegram을 사용할 때만 필요하며 화면이나 로그에 표시되지 않습니다." />
+
+                        <CheckBox
+                            x:Name="DiscordCheckBox"
+                            Margin="0,16,0,0"
+                            Content="Discord 사용"
+                            IsChecked="False"
+                            IsThreeState="False"
+                            TabIndex="25"
+                            AutomationProperties.Name="Discord 채널 사용" />
+                        <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Discord 봇 토큰" />
+                        <PasswordBox
+                            x:Name="DiscordTokenPasswordBox"
+                            IsEnabled="False"
+                            MaxLength="2560"
+                            TabIndex="26"
+                            AutomationProperties.Name="Discord 봇 토큰 입력"
+                            AutomationProperties.HelpText="Discord를 사용할 때만 필요하며 화면이나 로그에 표시되지 않습니다." />
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Style="{StaticResource SectionBorderStyle}"
+                    Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}">
+                    <StackPanel>
+                        <TextBlock
+                            Style="{StaticResource HeadingTextStyle}"
+                            Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                            Text="적용되는 안전 기본값" />
+                        <TextBlock
+                            Margin="0,10,0,0"
+                            Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                            Style="{StaticResource BodyTextStyle}"
+                            Text="• Gateway는 이 PC의 loopback 주소에서만 열고 토큰 인증을 사용합니다.&#x0a;• 새 개인 메시지는 자동 허용하지 않고 페어링 승인을 요구합니다.&#x0a;• 그룹 메시지와 채널을 통한 설정 변경은 기본적으로 끕니다.&#x0a;• 개인 메시지 세션을 사용자별로 분리하고 메시징 도구만 허용합니다.&#x0a;• 호스트 명령 실행과 관리자 권한 상승은 허용하지 않습니다."
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource SectionBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource HeadingTextStyle}" Text="3. 변경 내용 확인" />
+                        <TextBlock
+                            Margin="0,6,0,12"
+                            Style="{StaticResource BodyTextStyle}"
+                            Text="먼저 안전한 미리보기와 dry-run 검사를 만드세요. 입력을 바꾸면 기존 승인은 자동으로 해제됩니다."
+                            TextWrapping="Wrap" />
+                        <Button
+                            x:Name="PreviewButton"
+                            MinWidth="160"
+                            HorizontalAlignment="Left"
+                            Content="미리보기 만들기"
+                            TabIndex="30"
+                            AutomationProperties.Name="설정 변경 미리보기 만들기" />
+                        <TextBox
+                            x:Name="PreviewTextBox"
+                            MinHeight="180"
+                            MaxHeight="360"
+                            Margin="0,12,0,0"
+                            AcceptsReturn="True"
+                            IsReadOnly="True"
+                            TextWrapping="Wrap"
+                            VerticalScrollBarVisibility="Auto"
+                            HorizontalScrollBarVisibility="Disabled"
+                            TabIndex="31"
+                            AutomationProperties.Name="안전한 설정 변경 미리보기"
+                            AutomationProperties.HelpText="비밀값은 이 미리보기에 포함되지 않습니다." />
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource SectionBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource HeadingTextStyle}" Text="4. 승인 및 적용" />
+                        <TextBlock
+                            Margin="0,6,0,10"
+                            Style="{StaticResource BodyTextStyle}"
+                            Text="미리보기의 변경 범위와 안전 기본값을 확인한 뒤 직접 승인해 주세요."
+                            TextWrapping="Wrap" />
+                        <CheckBox
+                            x:Name="ApprovalCheckBox"
+                            Content="위 미리보기의 변경 사항을 이 PC에 적용하는 데 동의합니다."
+                            IsChecked="False"
+                            IsEnabled="False"
+                            IsThreeState="False"
+                            TabIndex="40"
+                            AutomationProperties.Name="설정 변경 적용 승인"
+                            AutomationProperties.HelpText="승인은 기본적으로 해제되어 있으며 입력이 바뀌면 다시 해제됩니다." />
+
+                        <ProgressBar
+                            x:Name="BusyProgressBar"
+                            Height="16"
+                            Margin="0,14,0,0"
+                            IsIndeterminate="True"
+                            Visibility="Collapsed"
+                            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+                            Foreground="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"
+                            AutomationProperties.Name="설정 작업 진행 중" />
+
+                        <WrapPanel Margin="0,18,0,0" HorizontalAlignment="Right">
+                            <Button
+                                x:Name="AdvancedButton"
+                                MinWidth="170"
+                                Margin="0,0,8,8"
+                                Content="공식 고급 설정"
+                                TabIndex="41"
+                                AutomationProperties.Name="OpenClaw 공식 고급 설정 열기"
+                                AutomationProperties.HelpText="별도의 보이는 Windows PowerShell 창에서 공식 OpenClaw 설정을 시작합니다." />
+                            <Button
+                                x:Name="CancelButton"
+                                MinWidth="110"
+                                Margin="0,0,8,8"
+                                Content="취소"
+                                IsCancel="True"
+                                IsDefault="True"
+                                TabIndex="42"
+                                AutomationProperties.Name="쉬운 설정 취소" />
+                            <Button
+                                x:Name="ApplyButton"
+                                MinWidth="140"
+                                Margin="0,0,0,8"
+                                Content="안전하게 적용"
+                                IsEnabled="False"
+                                TabIndex="43"
+                                AutomationProperties.Name="승인한 설정 안전하게 적용" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border
+            Grid.Row="2"
+            Padding="24,11"
+            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+            BorderThickness="0,1,0,0">
+            <TextBlock
+                x:Name="StatusText"
+                Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                Text="입력한 뒤 미리보기를 만들어 주세요."
+                TextWrapping="Wrap"
+                AutomationProperties.LiveSetting="Polite" />
+        </Border>
+    </Grid>
+</Window>

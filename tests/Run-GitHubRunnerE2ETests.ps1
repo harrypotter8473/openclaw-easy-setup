@@ -1,0 +1,282 @@
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$workflowPath = Join-Path $projectRoot '.github\workflows\windows-install-e2e.yml'
+$controllerPath = Join-Path $projectRoot 'tests\e2e\Invoke-OnGitHubHostedRunner.ps1'
+$workerPath = Join-Path $projectRoot 'tests\e2e\Invoke-InstallSmokeWorker.ps1'
+$modulePath = Join-Path $projectRoot 'src\OpenClawEasySetup.psm1'
+$script:Passed = 0
+$script:Failed = 0
+
+function Assert-True {
+    param([bool]$Condition, [string]$Name)
+    if ($Condition) {
+        $script:Passed++
+        Write-Host "PASS: $Name" -ForegroundColor Green
+    }
+    else {
+        $script:Failed++
+        Write-Host "FAIL: $Name" -ForegroundColor Red
+    }
+}
+
+function Assert-Parses {
+    param([string]$Path, [string]$Name)
+    $tokens = $null
+    $parseErrors = $null
+    $null = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    Assert-True -Condition (@($parseErrors).Count -eq 0) -Name $Name
+}
+
+function Get-OpenClawE2ESummaryScript {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkflowText
+    )
+
+    $stepMarker = '      - name: Publish sanitized job summary'
+    $runMarker = '        run: |'
+    $stepIndex = $WorkflowText.IndexOf($stepMarker, [StringComparison]::Ordinal)
+    $runIndex = if ($stepIndex -ge 0) {
+        $WorkflowText.IndexOf($runMarker, $stepIndex, [StringComparison]::Ordinal)
+    }
+    else {
+        -1
+    }
+    if ($runIndex -lt 0) {
+        throw 'Summary script block was not found.'
+    }
+
+    $block = $WorkflowText.Substring($runIndex + $runMarker.Length)
+    $sourceLines = New-Object Collections.Generic.List[string]
+    foreach ($line in @($block -split '\r?\n')) {
+        if ($line.StartsWith('          ', [StringComparison]::Ordinal)) {
+            $sourceLines.Add($line.Substring(10))
+        }
+        elseif ($line.Length -eq 0) {
+            $sourceLines.Add('')
+        }
+        else {
+            break
+        }
+    }
+    return $sourceLines -join [Environment]::NewLine
+}
+
+function Invoke-OpenClawE2ESummaryCase {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$SummaryScript,
+
+        [AllowNull()]
+        [object]$Receipt,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ControllerOutcome,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedCommit
+    )
+
+    $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $caseRoot = [IO.Path]::GetFullPath((Join-Path $tempBase ('OpenClawE2ESummaryTest-' + [Guid]::NewGuid().ToString('N'))))
+    $tempPrefix = $tempBase.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $caseRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Unexpected test temp path.'
+    }
+
+    [void][IO.Directory]::CreateDirectory($caseRoot)
+    $receiptPath = Join-Path $caseRoot 'result.json'
+    $summaryPath = Join-Path $caseRoot 'summary.md'
+    $environmentNames = @('OCES_E2E_RESULT', 'OCES_E2E_EXPECTED_SHA', 'OCES_E2E_OUTCOME', 'GITHUB_STEP_SUMMARY')
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+    }
+
+    try {
+        if ($null -ne $Receipt) {
+            $json = $Receipt | ConvertTo-Json -Depth 8
+            [IO.File]::WriteAllText($receiptPath, $json, (New-Object Text.UTF8Encoding($false)))
+        }
+        $env:OCES_E2E_RESULT = $receiptPath
+        $env:OCES_E2E_EXPECTED_SHA = $ExpectedCommit
+        $env:OCES_E2E_OUTCOME = $ControllerOutcome
+        $env:GITHUB_STEP_SUMMARY = $summaryPath
+
+        $threw = $false
+        try {
+            & $SummaryScript
+        }
+        catch {
+            $threw = $true
+        }
+        $summary = if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
+            Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8
+        }
+        else {
+            ''
+        }
+        return [pscustomobject]@{
+            Threw = $threw
+            Summary = $summary
+        }
+    }
+    finally {
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $previousEnvironment[$name],
+                [EnvironmentVariableTarget]::Process
+            )
+        }
+        if ([IO.Directory]::Exists($caseRoot) -and
+            $caseRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            [IO.Directory]::Delete($caseRoot, $true)
+        }
+    }
+}
+
+Assert-Parses -Path $controllerPath -Name 'GitHub-hosted runner controller parses as PowerShell'
+Assert-Parses -Path $workerPath -Name 'Install-smoke worker parses as PowerShell'
+
+$workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
+$controller = Get-Content -LiteralPath $controllerPath -Raw -Encoding UTF8
+$worker = Get-Content -LiteralPath $workerPath -Raw -Encoding UTF8
+$module = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
+
+Assert-True -Condition ($workflow -match '(?m)^\s{2}workflow_dispatch:\s*$') -Name 'Install E2E is manually dispatched'
+Assert-True -Condition ($workflow -notmatch '(?m)^\s{2}(push|pull_request|schedule):') -Name 'Install E2E never runs automatically on repository events'
+Assert-True -Condition ($workflow -match '(?ms)^permissions:\s*\r?\n\s{2}contents:\s*read\s*$') -Name 'Workflow has read-only repository permissions'
+Assert-True -Condition ($workflow.Contains("runs-on: windows-latest") -and $workflow.Contains('timeout-minutes: 30')) -Name 'Workflow uses a bounded hosted Windows job'
+Assert-True -Condition ($workflow.Contains('persist-credentials: false') -and $workflow.Contains('fetch-depth: 1')) -Name 'Checkout leaves no repository credential behind'
+Assert-True -Condition ($workflow -notmatch '(?i)(secrets\.|vars\.|environment:|upload-artifact)') -Name 'Workflow references no secrets, environment, variables, or uploaded artifacts'
+Assert-True -Condition ($workflow.Contains('if: github.ref_name != github.event.repository.default_branch') -and $workflow.Contains("throw 'E2E-DEFAULT-BRANCH-REQUIRED'") -and $workflow.Contains('ref: ${{ github.sha }}')) -Name 'A non-default branch fails before checkout instead of reporting a skipped success'
+Assert-True -Condition ($workflow.Contains('OCES_E2E_EXPECTED_SHA: ${{ github.sha }}') -and $workflow.Contains('"- Tested commit: $testedCommit"')) -Name 'Summary validates and prints the exact tested commit'
+Assert-True -Condition ($workflow.Contains('${{ runner.temp }}\OpenClawEasySetup-GitHubE2E\result.json')) -Name 'Sanitized receipt stays under runner temp'
+Assert-True -Condition ($workflow.Contains('${{ steps.install_e2e.outcome }}') -and $workflow.Contains('E2E-RESULT-INVALID')) -Name 'Summary cannot report PASS when the controller failed or the receipt is invalid'
+Assert-True -Condition ($workflow.Contains('[IO.FileAttributes]::ReparsePoint') -and $workflow.Contains('^(OCES|E2E)-[A-Z0-9-]{1,64}$')) -Name 'Summary validates receipt type and fixed output formats before rendering'
+Assert-True -Condition ($workflow.Contains("throw 'E2E-SUMMARY-FAIL-CLOSED'") -and $workflow.Contains('$stages.Count -eq $expectedStageIds.Count')) -Name 'Missing or incomplete evidence makes the summary step fail closed'
+Assert-True -Condition ($workflow.Contains('$installedVersion -eq $targetVersion') -and $workflow.Contains('$result.installationSucceeded -eq $true') -and $workflow.Contains('$candidateErrorCode -eq ''''')) -Name 'PASS requires exact versions and every independent postcondition'
+
+Assert-True -Condition ($controller.Contains('$env:RUNNER_ENVIRONMENT -ne ''github-hosted''') -and $controller.Contains('$env:GITHUB_EVENT_NAME -ne ''workflow_dispatch''')) -Name 'Controller refuses local and non-manual execution'
+Assert-True -Condition ($controller.Contains('E2E-COMMIT-INVALID') -and $controller.Contains('$result.testedCommit = $testedCommit')) -Name 'Controller attests the selected default-branch commit'
+Assert-True -Condition ($controller.Contains('E2E-RUNNER-PATH-INVALID') -and $controller.Contains('Test-OpenClawE2EPathContainedBy')) -Name 'Controller confines mutable state to runner temp outside the checkout'
+Assert-True -Condition ($controller.Contains('Set-OpenClawE2EMinimalEnvironment') -and -not $controller.Contains('ACTIONS_RUNTIME_TOKEN')) -Name 'Controller rebuilds rather than selectively deleting the worker environment'
+Assert-True -Condition ($controller.Contains('(TOKEN|SECRET|PASSWORD|CREDENTIAL|API[_-]?KEY|AUTH)') -and $controller.Contains('$result.credentialsScrubbed = $true')) -Name 'Controller fails closed if a credential-like environment name survives'
+Assert-True -Condition ($controller.Contains('$stagedFiles = @(') -and $controller.Contains('''tests\e2e\Invoke-InstallSmokeWorker.ps1''')) -Name 'Controller stages an explicit minimal source allowlist'
+Assert-True -Condition (([regex]::Matches($controller, 'Assert-OpenClawE2EStagedSource -SourceRoot')).Count -eq 2 -and $controller.Contains('E2E-SOURCE-MUTATED')) -Name 'Staged source hashes are checked before and after installation'
+Assert-True -Condition ($controller.Contains('$safePathCandidates') -and $controller.Contains('(Join-Path $env:ProgramFiles ''nodejs'')') -and $controller.Contains('Assert-OpenClawE2EExpandedPath') -and $controller.Contains('E2E-PATH-EXPANSION-INVALID')) -Name 'Worker and post-install verification reject GitHub toolcache paths'
+Assert-True -Condition ($controller.Contains('NPM_CONFIG_USERCONFIG') -and $controller.Contains('GIT_CONFIG_NOSYSTEM')) -Name 'Worker uses empty npm and Git user configuration'
+Assert-True -Condition ($controller.Contains('-RedirectStandardOutput $standardOutputPath') -and $controller.Contains('Get-OpenClawE2ESafeErrorCode')) -Name 'Raw installer output remains private and only stable codes are extracted'
+Assert-True -Condition ($controller.Contains('Read-OpenClawCheckpoint') -and $controller.Contains('Resolve-OpenClawInvocation')) -Name 'Controller independently validates checkpoint and package receipt'
+Assert-True -Condition ($controller.Contains('Get-OpenClawSlackPluginInspection') -and $module.Contains('@(''plugins'', ''inspect'', $pluginId, ''--json'')') -and $module.Contains('@(''plugins'', ''inspect'', $pluginId, ''--runtime'', ''--json'')')) -Name 'Slack provenance is checked before runtime loading'
+Assert-True -Condition ($module.Contains('''Get-OpenClawSlackPluginInspection''')) -Name 'The ordered Slack inspection contract is exported for E2E verification'
+Assert-True -Condition ($controller.Contains('E2E-RESULT-PERSISTENCE-FAILED') -and $controller.Contains('-not $resultWritten')) -Name 'Missing result persistence fails the E2E run closed'
+Assert-True -Condition ($controller.Contains('if ($result.installerExitCode -eq 0)') -and $controller.Contains('$checkpointEvidence = $null')) -Name 'Installer failures preserve their safe code when checkpoint evidence is unavailable'
+
+Assert-True -Condition ($worker.Contains('-SkipOnboarding') -and $worker.Contains('-Confirm:$false')) -Name 'Worker skips token entry and binds noninteractive confirmation as a Boolean'
+Assert-True -Condition ($worker.Contains('& $entryPoint') -and -not $controller.Contains('-Confirm:$false')) -Name 'Worker evaluates confirmation inside PowerShell instead of a native argument string'
+
+$summarySource = Get-OpenClawE2ESummaryScript -WorkflowText $workflow
+$summaryTokens = $null
+$summaryParseErrors = $null
+$null = [Management.Automation.Language.Parser]::ParseInput(
+    $summarySource,
+    [ref]$summaryTokens,
+    [ref]$summaryParseErrors
+)
+Assert-True -Condition (@($summaryParseErrors).Count -eq 0) -Name 'Workflow summary block parses as PowerShell'
+$summaryScript = [scriptblock]::Create($summarySource)
+
+$testedCommit = ('a' * 40) -join ''
+$expectedStageIds = @('diagnose', 'node', 'download', 'integrity', 'dryRun', 'install', 'onboard', 'verify')
+$expectedStageStatuses = @('Succeeded', 'Succeeded', 'Succeeded', 'Succeeded', 'Succeeded', 'Succeeded', 'Skipped', 'Skipped')
+$successfulStages = @(
+    for ($index = 0; $index -lt $expectedStageIds.Count; $index++) {
+        [pscustomobject]@{
+            id = $expectedStageIds[$index]
+            status = $expectedStageStatuses[$index]
+        }
+    }
+)
+$successReceipt = [ordered]@{
+    schemaVersion = 1
+    success = $true
+    harnessCompleted = $true
+    environmentVerified = $true
+    credentialsScrubbed = $true
+    installerExitCode = 0
+    errorCode = ''
+    targetVersion = '2026.7.1'
+    testedCommit = $testedCommit
+    installedVersion = '2026.7.1'
+    installationSucceeded = $true
+    provenanceReceiptValidated = $true
+    slackPluginVerified = $true
+    stages = $successfulStages
+}
+
+$successCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $successReceipt -ControllerOutcome success -ExpectedCommit $testedCommit
+Assert-True -Condition (-not $successCase.Threw -and $successCase.Summary.Contains('- Result: PASS') -and $successCase.Summary.Contains($testedCommit)) -Name 'Complete consistent evidence produces PASS'
+
+$missingCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $null -ControllerOutcome success -ExpectedCommit $testedCommit
+Assert-True -Condition ($missingCase.Threw -and $missingCase.Summary.Contains('- Result: FAIL')) -Name 'Missing receipt fails the summary step'
+
+$shortReceipt = [ordered]@{}
+foreach ($key in $successReceipt.Keys) {
+    $shortReceipt[$key] = $successReceipt[$key]
+}
+$shortReceipt['stages'] = @($successfulStages | Select-Object -First 7)
+$shortCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $shortReceipt -ControllerOutcome success -ExpectedCommit $testedCommit
+Assert-True -Condition ($shortCase.Threw -and $shortCase.Summary.Contains('- Result: FAIL')) -Name 'Truncated stage evidence cannot produce PASS'
+
+$contradictoryReceipt = [ordered]@{}
+foreach ($key in $successReceipt.Keys) {
+    $contradictoryReceipt[$key] = $successReceipt[$key]
+}
+$contradictoryReceipt['provenanceReceiptValidated'] = $false
+$contradictoryCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $contradictoryReceipt -ControllerOutcome success -ExpectedCommit $testedCommit
+Assert-True -Condition ($contradictoryCase.Threw -and $contradictoryCase.Summary.Contains('- Result: FAIL')) -Name 'Contradictory success evidence cannot produce PASS'
+
+$failureReceipt = [ordered]@{
+    schemaVersion = 1
+    success = $false
+    harnessCompleted = $true
+    environmentVerified = $true
+    credentialsScrubbed = $true
+    installerExitCode = 1
+    errorCode = 'E2E-INSTALLER-FAILED'
+    targetVersion = '2026.7.1'
+    testedCommit = $testedCommit
+    installedVersion = ''
+    installationSucceeded = $false
+    provenanceReceiptValidated = $false
+    slackPluginVerified = $false
+    stages = @()
+}
+$failureCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $failureReceipt -ControllerOutcome failure -ExpectedCommit $testedCommit
+Assert-True -Condition ($failureCase.Threw -and $failureCase.Summary.Contains('- Result: FAIL') -and $failureCase.Summary.Contains('E2E-INSTALLER-FAILED')) -Name 'Valid installer failure keeps its sanitized error code while failing closed'
+
+$otherCommit = ('b' * 40) -join ''
+$commitMismatchCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $successReceipt -ControllerOutcome success -ExpectedCommit $otherCommit
+Assert-True -Condition ($commitMismatchCase.Threw -and $commitMismatchCase.Summary.Contains('- Result: FAIL')) -Name 'Commit mismatch cannot produce PASS'
+
+$maliciousCommitReceipt = [ordered]@{}
+foreach ($key in $successReceipt.Keys) {
+    $maliciousCommitReceipt[$key] = $successReceipt[$key]
+}
+$maliciousCommitReceipt['testedCommit'] = $testedCommit + "`n- injected"
+$maliciousCommitCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $maliciousCommitReceipt -ControllerOutcome success -ExpectedCommit $testedCommit
+Assert-True -Condition ($maliciousCommitCase.Threw -and $maliciousCommitCase.Summary.Contains('(invalid receipt)') -and -not $maliciousCommitCase.Summary.Contains('injected')) -Name 'Invalid commit text cannot inject Markdown into the summary'
+
+
+Write-Host ''
+Write-Host ("GitHub runner E2E contract tests: {0} passed, {1} failed" -f $script:Passed, $script:Failed)
+if ($script:Failed -gt 0) {
+    exit 1
+}

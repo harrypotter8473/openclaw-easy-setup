@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  powershell-tests:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Test with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-Tests.ps1
+
+      - name: Test safe settings with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-SettingsTests.ps1
+
+      - name: Test native credential resolver with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-CredentialResolverTests.ps1
+
+      - name: Test GUI with Windows PowerShell 5.1
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -Sta -File ./tests/Run-GuiTests.ps1
+
+      - name: Test Windows Sandbox harness with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-SandboxTests.ps1
+
+      - name: Test GitHub-hosted install E2E contract with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Run-GitHubRunnerE2ETests.ps1
+
+      - name: Test with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1
+
+      - name: Test safe settings with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-SettingsTests.ps1
+
+      - name: Test GUI with PowerShell 7
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -Sta -File ./tests/Run-GuiTests.ps1
+
+      - name: Test Windows Sandbox harness with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-SandboxTests.ps1
+
+      - name: Test GitHub-hosted install E2E contract with PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-GitHubRunnerE2ETests.ps1
+
+      - name: Smoke-test plan with Windows PowerShell 5.1
+        shell: powershell
+        run: ./OpenClawEasySetup.ps1 -Action Plan
+
+      - name: Smoke-test plan with PowerShell 7
+        shell: pwsh
+        run: ./OpenClawEasySetup.ps1 -Action Plan
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

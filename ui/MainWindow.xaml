@@ -1,0 +1,478 @@
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    x:Name="MainWindow"
+    Width="920"
+    Height="720"
+    MinWidth="520"
+    MinHeight="320"
+    WindowStartupLocation="CenterScreen"
+    UseLayoutRounding="True"
+    SnapsToDevicePixels="True"
+    Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+    Foreground="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}">
+    <Window.Resources>
+        <Style TargetType="{x:Type Button}">
+            <Setter Property="MinHeight" Value="44" />
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style TargetType="{x:Type CheckBox}">
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            <Setter Property="Padding" Value="4" />
+        </Style>
+        <Style TargetType="{x:Type TextBox}">
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
+            <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+        </Style>
+        <Style x:Key="SectionBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Padding" Value="24" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+        </Style>
+        <Style x:Key="StageBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Margin" Value="0,0,0,8" />
+            <Setter Property="Padding" Value="12" />
+            <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.ControlBrushKey}}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="3" />
+        </Style>
+        <Style x:Key="HeadingTextStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="FontSize" Value="24" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="BodyTextStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </Window.Resources>
+
+    <Grid x:Name="RootGrid">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border
+            x:Name="HeaderPanel"
+            Grid.Row="0"
+            Padding="24,18"
+            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+            BorderThickness="0,0,0,1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock
+                        x:Name="HeaderTitleText"
+                        FontSize="26"
+                        FontWeight="SemiBold"
+                        Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                        TextWrapping="Wrap" />
+                    <TextBlock
+                        x:Name="HeaderSubtitleText"
+                        Margin="0,4,0,0"
+                        FontSize="14"
+                        Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+                <TextBlock
+                    x:Name="HeaderStatusText"
+                    Grid.Column="1"
+                    Margin="20,0,0,0"
+                    VerticalAlignment="Center"
+                    FontWeight="SemiBold"
+                    Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                    TextWrapping="Wrap" />
+            </Grid>
+        </Border>
+
+        <ScrollViewer
+            x:Name="MainScrollViewer"
+            Grid.Row="1"
+            Padding="24"
+            HorizontalScrollBarVisibility="Disabled"
+            VerticalScrollBarVisibility="Auto"
+            Focusable="False">
+            <Grid x:Name="PageHost">
+                <Border
+                    x:Name="HomePanel"
+                    Style="{StaticResource SectionBorderStyle}"
+                    Visibility="Visible">
+                    <StackPanel>
+                        <TextBlock x:Name="HomeHeadingText" Style="{StaticResource HeadingTextStyle}" />
+                        <TextBlock
+                            x:Name="HomeDescriptionText"
+                            Margin="0,8,0,24"
+                            Style="{StaticResource BodyTextStyle}" />
+                        <Grid x:Name="HomeActionsGrid">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Button x:Name="DiagnoseButton" Grid.Row="0" Grid.Column="0" Margin="0,0,6,12" TabIndex="10" />
+                            <Button x:Name="InstallButton" Grid.Row="0" Grid.Column="1" Margin="6,0,0,12" TabIndex="11" />
+                            <Button x:Name="ResumeButton" Grid.Row="1" Grid.Column="0" Margin="0,0,6,12" TabIndex="12" />
+                            <Button x:Name="ConfigureButton" Grid.Row="1" Grid.Column="1" Margin="6,0,0,12" TabIndex="13" />
+                            <Button x:Name="VerifyButton" Grid.Row="2" Grid.Column="0" Margin="0,0,6,0" TabIndex="14" />
+                            <Button x:Name="BundleButton" Grid.Row="2" Grid.Column="1" Margin="6,0,0,0" TabIndex="15" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    x:Name="PlanPanel"
+                    Style="{StaticResource SectionBorderStyle}"
+                    Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock x:Name="PlanHeadingText" Style="{StaticResource HeadingTextStyle}" />
+                        <TextBlock
+                            x:Name="PlanDescriptionText"
+                            Margin="0,8,0,18"
+                            Style="{StaticResource BodyTextStyle}" />
+                        <ItemsControl x:Name="PlanItemsControl" Margin="0,0,0,18" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock
+                                        Margin="0,0,0,8"
+                                        Text="{Binding}"
+                                        TextWrapping="Wrap" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <Border
+                            x:Name="PlanApprovalPanel"
+                            Padding="14"
+                            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+                            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                            <StackPanel>
+                                <TextBlock
+                                    x:Name="PlanApprovalGuidanceText"
+                                    Margin="0,0,0,10"
+                                    Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                                    Style="{StaticResource BodyTextStyle}" />
+                                <CheckBox
+                                    x:Name="PlanApprovalCheckBox"
+                                    IsChecked="False"
+                                    IsThreeState="False"
+                                    TabIndex="20" />
+                            </StackPanel>
+                        </Border>
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Button
+                                x:Name="PlanCancelButton"
+                                Grid.Column="1"
+                                MinWidth="120"
+                                Margin="0,0,8,0"
+                                IsDefault="True"
+                                TabIndex="21" />
+                            <Button
+                                x:Name="PlanStartButton"
+                                Grid.Column="2"
+                                MinWidth="120"
+                                IsEnabled="False"
+                                TabIndex="22" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    x:Name="WorkPanel"
+                    Style="{StaticResource SectionBorderStyle}"
+                    Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock x:Name="WorkHeadingText" Style="{StaticResource HeadingTextStyle}" />
+                        <TextBlock
+                            x:Name="WorkSummaryText"
+                            Margin="0,8,0,14"
+                            Style="{StaticResource BodyTextStyle}" />
+                        <ProgressBar
+                            x:Name="OverallProgressBar"
+                            Height="18"
+                            Margin="0,0,0,18"
+                            Minimum="0"
+                            Maximum="100"
+                            Value="0"
+                            IsIndeterminate="False"
+                            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+                            Foreground="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}" />
+
+                        <StackPanel x:Name="WorkStageList">
+                            <Border x:Name="DiagnoseStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="DiagnoseStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="DiagnoseStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="DiagnoseStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="NodeStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="NodeStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="NodeStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="NodeStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="DownloadStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="DownloadStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="DownloadStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="DownloadStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="IntegrityStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="IntegrityStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="IntegrityStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="IntegrityStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="DryRunStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="DryRunStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="DryRunStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="DryRunStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="InstallStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="InstallStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="InstallStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="InstallStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="OnboardStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="OnboardStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="OnboardStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="OnboardStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border x:Name="VerifyStagePanel" Style="{StaticResource StageBorderStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="36" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="VerifyStageStatusText" Grid.Column="0" VerticalAlignment="Center" TextAlignment="Center" />
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock x:Name="VerifyStageTitleText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="VerifyStageDetailText" Margin="0,3,0,0" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+
+                        <TextBlock
+                            x:Name="WorkCancelGuidanceText"
+                            Margin="0,10,0,10"
+                            Style="{StaticResource BodyTextStyle}" />
+                        <Button
+                            x:Name="WorkCancelButton"
+                            MinWidth="160"
+                            HorizontalAlignment="Right"
+                            TabIndex="30" />
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    x:Name="ResultPanel"
+                    Style="{StaticResource SectionBorderStyle}"
+                    Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock x:Name="ResultHeadingText" Style="{StaticResource HeadingTextStyle}" />
+                        <TextBlock
+                            x:Name="ResultSummaryText"
+                            Margin="0,8,0,18"
+                            Style="{StaticResource BodyTextStyle}" />
+
+                        <Border
+                            x:Name="ResultErrorPanel"
+                            Margin="0,0,0,12"
+                            Padding="14"
+                            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+                            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                            <StackPanel>
+                                <TextBlock x:Name="ResultErrorLabelText" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                <TextBlock x:Name="ResultErrorCodeText" Margin="0,4,0,0" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock
+                            x:Name="ResultGuidanceText"
+                            Margin="0,0,0,18"
+                            Style="{StaticResource BodyTextStyle}" />
+
+                        <Border
+                            x:Name="ResultLogPanel"
+                            Margin="0,0,0,12"
+                            Padding="14"
+                            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+                            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                            <StackPanel>
+                                <TextBlock
+                                    x:Name="ResultLogGuidanceText"
+                                    Margin="0,0,0,8"
+                                    Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                                    TextWrapping="Wrap" />
+                                <TextBox
+                                    x:Name="ResultLogPathTextBox"
+                                    IsReadOnly="True"
+                                    TabIndex="40" />
+                                <Button
+                                    x:Name="ResultOpenLogButton"
+                                    MinWidth="140"
+                                    Margin="0,10,0,0"
+                                    HorizontalAlignment="Right"
+                                    TabIndex="41" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border
+                            x:Name="ResultBundlePanel"
+                            Padding="14"
+                            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+                            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                            <StackPanel>
+                                <TextBlock
+                                    x:Name="ResultBundleGuidanceText"
+                                    Margin="0,0,0,8"
+                                    Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                                    TextWrapping="Wrap" />
+                                <TextBox
+                                    x:Name="ResultBundlePathTextBox"
+                                    IsReadOnly="True"
+                                    TabIndex="42" />
+                                <Grid Margin="0,10,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Button
+                                        x:Name="ResultCreateBundleButton"
+                                        Grid.Column="1"
+                                        MinWidth="140"
+                                        Margin="0,0,8,0"
+                                        TabIndex="43" />
+                                    <Button
+                                        x:Name="ResultOpenBundleButton"
+                                        Grid.Column="2"
+                                        MinWidth="140"
+                                        TabIndex="44" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Button
+                                x:Name="ResultHomeButton"
+                                Grid.Column="1"
+                                MinWidth="120"
+                                Margin="0,0,8,0"
+                                TabIndex="45" />
+                            <Button
+                                x:Name="ResultPrimaryButton"
+                                Grid.Column="2"
+                                MinWidth="120"
+                                TabIndex="46" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </ScrollViewer>
+
+        <Border
+            x:Name="FooterPanel"
+            Grid.Row="2"
+            Padding="24,10"
+            Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
+            BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+            BorderThickness="0,1,0,0">
+            <TextBlock
+                x:Name="FooterStatusText"
+                Foreground="{DynamicResource {x:Static SystemColors.ControlTextBrushKey}}"
+                TextWrapping="Wrap" />
+        </Border>
+    </Grid>
+</Window>
