@@ -413,6 +413,59 @@ Assert-True -Condition ($unsafePostconditionCodes.Count -eq 0) -Name 'Postcondit
 
 Assert-True -Condition ($worker.Contains('-SkipOnboarding') -and $worker.Contains('-Confirm:$false')) -Name 'Worker skips token entry and binds noninteractive confirmation as a Boolean'
 Assert-True -Condition ($worker.Contains('& $entryPoint') -and -not $controller.Contains('-Confirm:$false')) -Name 'Worker evaluates confirmation inside PowerShell instead of a native argument string'
+Assert-True -Condition ($worker.Contains('$global:LASTEXITCODE = 0') -and
+    $worker.Contains('$entryPointSucceeded = $?') -and
+    $worker.Contains('if (-not $entryPointSucceeded)') -and
+    $worker.Contains('$entryPointExitCode = [int]$LASTEXITCODE') -and
+    $worker.Contains('if ($entryPointExitCode -lt 1 -or $entryPointExitCode -gt 255)') -and
+    $worker.Contains('exit $entryPointExitCode')) -Name 'Worker preserves only failed entry point exit codes and ignores stale native status after success'
+
+$workerCaseRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('OpenClawE2EWorkerExitTest-' + [guid]::NewGuid().ToString('N'))))
+$workerTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$workerFailureExitCode = -1
+$workerSuccessExitCode = -1
+$workerInvalidExitCode = -1
+try {
+    $workerProjectRoot = Join-Path $workerCaseRoot 'project'
+    $workerStateRoot = Join-Path $workerCaseRoot 'state'
+    [void][IO.Directory]::CreateDirectory($workerProjectRoot)
+    [void][IO.Directory]::CreateDirectory($workerStateRoot)
+    $fakeEntryPoint = Join-Path $workerProjectRoot 'OpenClawEasySetup.ps1'
+    $trustedPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    [IO.File]::WriteAllText($fakeEntryPoint, "exit 41`r`n", (New-Object Text.UTF8Encoding($false)))
+    $failureProcess = Start-Process -FilePath $trustedPowerShell -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', ('"{0}"' -f $workerPath),
+        '-ProjectRoot', ('"{0}"' -f $workerProjectRoot),
+        '-StateDirectory', ('"{0}"' -f $workerStateRoot)
+    ) -WorkingDirectory $workerProjectRoot -WindowStyle Hidden -Wait -PassThru
+    $workerFailureExitCode = [int]$failureProcess.ExitCode
+
+    [IO.File]::WriteAllText($fakeEntryPoint, "& `$env:ComSpec /d /c 'exit 17'`r`n`$null = Get-Date`r`nreturn`r`n", (New-Object Text.UTF8Encoding($false)))
+    $successProcess = Start-Process -FilePath $trustedPowerShell -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', ('"{0}"' -f $workerPath),
+        '-ProjectRoot', ('"{0}"' -f $workerProjectRoot),
+        '-StateDirectory', ('"{0}"' -f $workerStateRoot)
+    ) -WorkingDirectory $workerProjectRoot -WindowStyle Hidden -Wait -PassThru
+    $workerSuccessExitCode = [int]$successProcess.ExitCode
+
+    [IO.File]::WriteAllText($fakeEntryPoint, "exit 256`r`n", (New-Object Text.UTF8Encoding($false)))
+    $invalidProcess = Start-Process -FilePath $trustedPowerShell -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', ('"{0}"' -f $workerPath),
+        '-ProjectRoot', ('"{0}"' -f $workerProjectRoot),
+        '-StateDirectory', ('"{0}"' -f $workerStateRoot)
+    ) -WorkingDirectory $workerProjectRoot -WindowStyle Hidden -Wait -PassThru
+    $workerInvalidExitCode = [int]$invalidProcess.ExitCode
+}
+finally {
+    if ([IO.Directory]::Exists($workerCaseRoot) -and
+        $workerCaseRoot.StartsWith($workerTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [IO.Directory]::Delete($workerCaseRoot, $true)
+    }
+}
+Assert-True -Condition ($workerFailureExitCode -eq 41 -and $workerSuccessExitCode -eq 0 -and $workerInvalidExitCode -eq 1) -Name 'PowerShell 5.1 worker propagates valid failures, ignores stale success status, and bounds invalid exit codes'
 
 $summarySource = Get-OpenClawE2ESummaryScript -WorkflowText $workflow
 $summaryTokens = $null
