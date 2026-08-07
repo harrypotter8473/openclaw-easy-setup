@@ -729,6 +729,9 @@ finally {
     Write-Host ("Windows install E2E: {0}" -f $statusText)
     Write-Host ("Target version: {0}" -f $result.targetVersion)
     Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)
+    foreach ($stage in @($result.stages)) {
+        Write-Host ("Checkpoint stage {0}: {1}" -f ([string]$stage.id), ([string]$stage.status))
+    }
     if (-not $result.success) {
         Write-Host ("Safe error code: {0}" -f $result.errorCode)
     }
