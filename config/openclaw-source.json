@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "reviewedOn": "2026-08-03",
+  "schemaVersion": 2,
+  "reviewedOn": "2026-08-07",
   "openClaw": {
     "version": "2026.7.1",
     "releaseTag": "v2026.7.1",
@@ -15,8 +15,9 @@
     "npmShasum": "942d747f74faa4c864a7b360e95f0f1dd0329a14"
   },
   "installer": {
-    "uri": "https://raw.githubusercontent.com/openclaw/openclaw/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/scripts/install.ps1",
-    "sha256": "0D473FA2A858B41A102F77582FA68799B2D80F6B637D544AB3EE4FB4661D2B89",
+    "commitSha": "f355f6afbb824e394d52045c67f850cc03470f3b",
+    "uri": "https://raw.githubusercontent.com/openclaw/openclaw/f355f6afbb824e394d52045c67f850cc03470f3b/scripts/install.ps1",
+    "sha256": "730F7EA6F1823DE76F9E5EA1670FDED33582E69B9447AB0FB9E0369C6EA45D53",
     "maxBytes": 262144,
     "installMethod": "npm"
   },

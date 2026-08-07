@@ -881,7 +881,7 @@ function Export-OpenClawDiagnosticBundle {
                 [ordered]@{ id = 'platform'; status = $(if (Test-OpenClawIsWindows) { 'Pass' } else { 'Fail' }); current = [Environment]::OSVersion.VersionString; required = 'Windows 10/11'; guidance = 'No external command was executed.' }
                 [ordered]@{ id = 'powershell'; status = $(if ($PSVersionTable.PSVersion -ge [version]'5.1.0') { 'Pass' } else { 'Fail' }); current = $PSVersionTable.PSVersion.ToString(); required = '5.1 or newer'; guidance = 'No external command was executed.' }
                 [ordered]@{ id = 'architecture'; status = $(if ($offlineArchitecture -in @('X64', 'Arm64', 'AMD64')) { 'Pass' } else { 'Warn' }); current = Protect-OpenClawLogText -Text $offlineArchitecture; required = 'x64 or Arm64'; guidance = 'No external command was executed.' }
-                [ordered]@{ id = 'pinnedSource'; status = 'Pass'; current = ("{0} @ {1}" -f $offlineSource.openClaw.releaseTag, $offlineSource.openClaw.commitSha); required = 'Pinned source configuration'; guidance = 'Git, Node, npm, WinGet, and OpenClaw were intentionally not executed while creating this offline bundle.' }
+                [ordered]@{ id = 'pinnedSource'; status = 'Pass'; current = ("{0} @ {1}; installer @ {2}" -f $offlineSource.openClaw.releaseTag, $offlineSource.openClaw.commitSha, $offlineSource.installer.commitSha); required = 'Pinned source and installer configuration'; guidance = 'Git, Node, npm, WinGet, and OpenClaw were intentionally not executed while creating this offline bundle.' }
             )
         }
         catch {
@@ -900,6 +900,7 @@ function Export-OpenClawDiagnosticBundle {
             targetOpenClawVersion = [string]$sourceConfig.openClaw.version
             targetOpenClawReleaseTag = [string]$sourceConfig.openClaw.releaseTag
             targetOpenClawCommit = [string]$sourceConfig.openClaw.commitSha
+            targetInstallerCommit = [string]$sourceConfig.installer.commitSha
             installerSha256 = ([string]$sourceConfig.installer.sha256).ToUpperInvariant()
             targetNodeVersion = [string]$sourceConfig.node.winget.version
             targetGitVersion = [string]$sourceConfig.git.winget.version

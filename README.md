@@ -7,7 +7,7 @@ Windows 초보자가 OpenClaw를 안전하게 설치하고, 중단되더라도 �
 ## 지금 가능한 것
 
 - PC 환경을 변경하지 않는 사전 진단과 설치 계획 확인
-- 공식 HTTPS 설치 스크립트와 고정된 릴리스·커밋·SHA-256 검증
+- 공식 HTTPS 설치 스크립트와 서로 구분해 고정한 패키지·설치기 커밋·SHA-256 검증
 - 필요한 경우 WinGet의 정확한 패키지·소스·버전으로 Git for Windows와 Node.js 준비
 - 다운로드 크기·PowerShell 문법·무결성 불일치 시 실행 차단
 - 단계별 체크포인트 저장과 중단된 설치 이어하기
@@ -160,10 +160,10 @@ powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -File .\OpenClawEasySetup
 
 ## 설치 안전 원칙
 
-- 현재 검토된 OpenClaw `v2026.7.1`과 해당 커밋의 설치 스크립트 SHA-256만 실행합니다.
+- 현재 검토된 OpenClaw `v2026.7.1` 패키지 소스 커밋과 Windows PowerShell 5.1 SQLite 검사 수정이 반영된 공식 설치 스크립트 커밋을 각각 고정하고, 검토된 설치 스크립트 SHA-256만 실행합니다.
 - 신뢰할 수 있는 Git for Windows가 없으면 WinGet의 `Git.Git` `2.55.0.3`을 정확히 지정합니다. 공식 설치 스크립트에는 이 서명된 Git만 노출해 별도의 고정되지 않은 Git 다운로드를 막습니다.
 - Node.js와 npm이 없거나 지원되지 않으면 WinGet의 `OpenJS.NodeJS` 패키지, `winget` 소스, Node.js `26.5.1`을 정확히 지정합니다.
-- 설치 버전, 커밋, 주소, 최대 크기, SHA-256은 [`config/openclaw-source.json`](config/openclaw-source.json)에 함께 고정합니다.
+- 설치 버전, 패키지 소스 커밋, 설치 스크립트 커밋, 주소, 최대 크기, SHA-256은 [`config/openclaw-source.json`](config/openclaw-source.json)에 함께 고정합니다.
 - 공식 Slack 플러그인의 정확한 패키지·버전·npm integrity·shasum도 같은 파일에 고정하고 설치·검증합니다.
 - 리디렉션이 발생해도 매 단계의 프로토콜과 호스트를 다시 검사합니다.
 - 내려받은 스크립트는 크기·문법·SHA-256과 dry-run을 확인한 뒤에만 실행합니다.
@@ -182,9 +182,10 @@ powershell.exe -NoProfile -Sta -ExecutionPolicy Bypass -File .\OpenClawEasySetup
 
 ## 공식 기준
 
-2026-08-03에 다음 공식 자료를 검토해 요구사항을 기록했습니다.
+2026-08-03에 패키지·설정 계약을 위한 다음 공식 자료를 검토했고, 2026-08-07에 Windows PowerShell 5.1 SQLite 검사를 수정한 공식 설치기 커밋과 SHA-256을 별도로 검토했습니다.
 
 - [OpenClaw 공식 저장소](https://github.com/openclaw/openclaw)
+- [Windows PowerShell 5.1 SQLite 검사 수정 커밋](https://github.com/openclaw/openclaw/commit/f355f6afbb824e394d52045c67f850cc03470f3b)
 - [공식 설치 문서](https://docs.openclaw.ai/install)
 - [Windows 문서](https://docs.openclaw.ai/platforms/windows)
 - [보안 문서](https://docs.openclaw.ai/gateway/security)
