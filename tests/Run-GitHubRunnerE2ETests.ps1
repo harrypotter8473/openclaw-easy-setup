@@ -215,6 +215,8 @@ Assert-True -Condition ($controller.Contains('Get-OpenClawE2EPostconditionErrorC
     $controller.Contains('E2E-POSTCONDITION-PROVENANCE-FAILED') -and
     $controller.Contains('E2E-SLACK-VERIFICATION-FAILED')) -Name 'Final postcondition failures use fixed diagnostic codes'
 Assert-True -Condition ($controller.Contains('Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)')) -Name 'Controller prints only the safe numeric installer exit code'
+Assert-True -Condition (([regex]::Matches($controller, '\$result\.stages\s*=')).Count -eq 1 -and
+    $controller.Contains('Write-Host ("Checkpoint stage {0}: {1}" -f ([string]$stage.id), ([string]$stage.status))')) -Name 'Controller prints only checkpoint stages copied from validated evidence'
 Assert-True -Condition ($controller -notmatch 'ScriptStackTrace|PositionMessage|InvocationInfo|Write-Host\s+\$_') -Name 'Controller never emits raw exception diagnostics'
 $moduleTokens = $null
 $moduleParseErrors = $null
