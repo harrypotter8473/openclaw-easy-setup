@@ -1970,8 +1970,9 @@ function Invoke-OpenClawPinnedInstallerFile {
 
         Push-Location -LiteralPath $safeWorkingDirectory
         try {
-            & $hostPath @arguments
-            return $LASTEXITCODE
+            & $hostPath @arguments | Out-Host
+            $installerExitCode = [int]$LASTEXITCODE
+            return $installerExitCode
         }
         finally {
             Pop-Location

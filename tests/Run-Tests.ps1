@@ -431,6 +431,49 @@ try {
         }
     }
 
+    [void][IO.Directory]::CreateDirectory($exactTemporaryTestRoot)
+    $syntheticInstallerPath = Join-Path $exactTemporaryTestRoot 'synthetic-installer.ps1'
+    $syntheticInstallerSource = [pscustomobject]@{
+        installer = [pscustomobject]@{ installMethod = 'npm' }
+        openClaw = [pscustomobject]@{ version = '2026.7.1' }
+    }
+    $trustedPowerShellPath = (Get-Process -Id $PID).Path
+    $invokeSyntheticInstaller = {
+        param([string]$InstallerPath)
+
+        & $openClawModule {
+            param($installerPathValue, $sourceConfigValue, $snapshotPathValue)
+
+            $originalSnapshotResolver = (Get-Command Get-OpenClawCommandSnapshot -CommandType Function).ScriptBlock
+            Set-Item -LiteralPath Function:\script:Get-OpenClawCommandSnapshot -Value {
+                param([string]$Name)
+
+                [pscustomobject]@{
+                    Found = $true
+                    Trusted = $true
+                    ExitCode = 0
+                    Version = [version]'26.5.1'
+                    Path = $snapshotPathValue
+                }
+            }
+            try {
+                Invoke-OpenClawPinnedInstallerFile -InstallerPath $installerPathValue -SourceConfig $sourceConfigValue -DryRun
+            }
+            finally {
+                Set-Item -LiteralPath Function:\script:Get-OpenClawCommandSnapshot -Value $originalSnapshotResolver
+            }
+        } $InstallerPath $syntheticInstallerSource $trustedPowerShellPath
+    }
+
+    [IO.File]::WriteAllText($syntheticInstallerPath, "param([switch]`$NoOnboard, [string]`$InstallMethod, [string]`$Tag, [switch]`$DryRun)`r`nWrite-Output 'synthetic installer output'`r`nexit 0`r`n", (New-Object Text.UTF8Encoding($false)))
+    $successfulInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)
+    Assert-True -Condition ($successfulInstallerResult.Count -eq 1 -and $successfulInstallerResult[0].GetType() -eq [int] -and $successfulInstallerResult[0] -eq 0) -Name 'Pinned installer wrapper returns only a scalar zero when the child writes output and succeeds'
+
+    [IO.File]::WriteAllText($syntheticInstallerPath, "param([switch]`$NoOnboard, [string]`$InstallMethod, [string]`$Tag, [switch]`$DryRun)`r`nWrite-Output 'synthetic installer output'`r`nexit 23`r`n", (New-Object Text.UTF8Encoding($false)))
+    $failedInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)
+    Assert-True -Condition ($failedInstallerResult.Count -eq 1 -and $failedInstallerResult[0].GetType() -eq [int] -and $failedInstallerResult[0] -eq 23) -Name 'Pinned installer wrapper returns only the exact scalar failure code when the child writes output'
+    Remove-Item -LiteralPath $syntheticInstallerPath -Force
+
     $sourceFingerprint = 'A' * 64
     $checkpoint = New-OpenClawCheckpoint -StateDirectory $exactTemporaryTestRoot -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
     Assert-True -Condition (Test-Path -LiteralPath $checkpoint.Path -PathType Leaf) -Name 'Checkpoint creation writes a state file'

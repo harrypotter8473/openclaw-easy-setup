@@ -28,6 +28,7 @@ if ($entryItem.PSIsContainer -or
 
 # Keep -Confirm:$false inside PowerShell language evaluation. Passing that text
 # through powershell.exe -File would bind it as a string in Windows PowerShell 5.1.
+$global:LASTEXITCODE = 0
 & $entryPoint `
     -Action Install `
     -Apply `
@@ -35,4 +36,12 @@ if ($entryItem.PSIsContainer -or
     -StateDirectory $stateFullPath `
     -Confirm:$false
 
+$entryPointSucceeded = $?
+if (-not $entryPointSucceeded) {
+    $entryPointExitCode = [int]$LASTEXITCODE
+    if ($entryPointExitCode -lt 1 -or $entryPointExitCode -gt 255) {
+        exit 1
+    }
+    exit $entryPointExitCode
+}
 exit 0
