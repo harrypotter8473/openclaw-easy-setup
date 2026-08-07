@@ -379,6 +379,58 @@ Assert-Equal -Actual $untrustedDecision.Decision -Expected 'UntrustedBlocked' -N
 $temporaryTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("OpenClawEasySetup-Tests-{0}" -f ([guid]::NewGuid().ToString('N')))
 $exactTemporaryTestRoot = [IO.Path]::GetFullPath($temporaryTestRoot)
 try {
+    $pathRefreshRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("OpenClawEasySetup-PathRefresh-{0}" -f ([guid]::NewGuid().ToString('N')))))
+    $pathEnvironmentNames = @('Path', 'ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA', 'APPDATA')
+    $savedPathEnvironment = @{}
+    foreach ($name in $pathEnvironmentNames) {
+        $savedPathEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+    }
+    try {
+        $safeCurrentPath = Join-Path $pathRefreshRoot 'safe-current'
+        $syntheticProgramFiles = Join-Path $pathRefreshRoot 'ProgramFiles'
+        $syntheticProgramFilesX86 = Join-Path $pathRefreshRoot 'ProgramFilesX86'
+        $syntheticLocalAppData = Join-Path $pathRefreshRoot 'LocalAppData'
+        $syntheticAppData = Join-Path $pathRefreshRoot 'AppData'
+        $expectedRefreshedPaths = @(
+            $safeCurrentPath,
+            (Join-Path $syntheticProgramFiles 'Git\cmd'),
+            (Join-Path $syntheticProgramFilesX86 'Git\cmd'),
+            (Join-Path $syntheticLocalAppData 'Programs\Git\cmd'),
+            (Join-Path $syntheticProgramFiles 'nodejs'),
+            (Join-Path $syntheticProgramFilesX86 'nodejs'),
+            (Join-Path $syntheticLocalAppData 'Programs\nodejs'),
+            (Join-Path $syntheticAppData 'npm')
+        )
+        foreach ($directoryPath in $expectedRefreshedPaths) {
+            [void](New-Item -ItemType Directory -Path $directoryPath -Force)
+        }
+        [Environment]::SetEnvironmentVariable('Path', $safeCurrentPath, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('ProgramFiles', $syntheticProgramFiles, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('ProgramFiles(x86)', $syntheticProgramFilesX86, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $syntheticLocalAppData, [EnvironmentVariableTarget]::Process)
+        [Environment]::SetEnvironmentVariable('APPDATA', $syntheticAppData, [EnvironmentVariableTarget]::Process)
+
+        Update-OpenClawProcessPath
+        $actualRefreshedPaths = @(([string]$env:Path).Split(';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Assert-Equal -Actual $actualRefreshedPaths.Count -Expected $expectedRefreshedPaths.Count -Name 'PATH refresh adds only the current process PATH and approved install directories'
+        Assert-True -Condition (@($expectedRefreshedPaths | Where-Object { $_ -notin $actualRefreshedPaths }).Count -eq 0) -Name 'PATH refresh discovers every approved Git, Node.js, and per-user npm directory'
+    }
+    finally {
+        foreach ($name in $pathEnvironmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $savedPathEnvironment[$name], [EnvironmentVariableTarget]::Process)
+        }
+        if (Test-Path -LiteralPath $pathRefreshRoot) {
+            $resolvedPathRefreshRoot = (Resolve-Path -LiteralPath $pathRefreshRoot).Path
+            if ([string]::Equals($resolvedPathRefreshRoot, $pathRefreshRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                Remove-Item -LiteralPath $resolvedPathRefreshRoot -Recurse -Force
+            }
+            else {
+                Write-Host "[FAIL] Refused to clean an unexpected PATH refresh fixture: $resolvedPathRefreshRoot" -ForegroundColor Red
+                $script:Failed++
+            }
+        }
+    }
+
     $sourceFingerprint = 'A' * 64
     $checkpoint = New-OpenClawCheckpoint -StateDirectory $exactTemporaryTestRoot -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
     Assert-True -Condition (Test-Path -LiteralPath $checkpoint.Path -PathType Leaf) -Name 'Checkpoint creation writes a state file'
