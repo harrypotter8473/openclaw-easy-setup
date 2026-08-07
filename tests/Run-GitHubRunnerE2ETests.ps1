@@ -207,6 +207,10 @@ Assert-True -Condition ($module.Contains('''Get-OpenClawSlackPluginInspection'''
 Assert-True -Condition ($controller.Contains('E2E-RESULT-PERSISTENCE-FAILED') -and $controller.Contains('-not $resultWritten')) -Name 'Missing result persistence fails the E2E run closed'
 Assert-True -Condition ($controller.Contains('if ($result.installerExitCode -eq 0)') -and $controller.Contains('$checkpointEvidence = $null')) -Name 'Installer failures preserve their safe code when checkpoint evidence is unavailable'
 Assert-True -Condition ($controller.Contains("throw 'E2E-CHECKPOINT-INVALID'") -and $controller.Contains('Stages = $safeStages.ToArray()') -and -not $controller.Contains('Stages = @($safeStages)')) -Name 'Checkpoint reads fail safely and PowerShell 5.1 materializes stage evidence explicitly'
+Assert-True -Condition ($controller.Contains('Get-OpenClawE2EPostconditionErrorCode -Result $result') -and
+    $controller.Contains('E2E-POSTCONDITION-INSTALLATION-FAILED') -and
+    $controller.Contains('E2E-POSTCONDITION-PROVENANCE-FAILED') -and
+    $controller.Contains('E2E-SLACK-VERIFICATION-FAILED')) -Name 'Final postcondition failures use fixed diagnostic codes'
 Assert-True -Condition ($controller.Contains('Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)')) -Name 'Controller prints only the safe numeric installer exit code'
 Assert-True -Condition ($controller -notmatch 'ScriptStackTrace|PositionMessage|InvocationInfo|Write-Host\s+\$_') -Name 'Controller never emits raw exception diagnostics'
 $moduleTokens = $null
@@ -358,6 +362,49 @@ $expectedPhaseCodes = @(
 Assert-True -Condition (($resolverEvidence.PhaseCodes -join ',') -eq ($expectedPhaseCodes -join ',')) -Name 'Every internal harness phase maps to a fixed safe code'
 Assert-True -Condition ($resolverEvidence.UnknownPhase -eq 'E2E-HARNESS-001' -and $resolverEvidence.MaliciousPhase -eq 'E2E-HARNESS-001') -Name 'Unknown or malformed harness phases become the generic code'
 Assert-True -Condition ($resolverEvidence.ExactSafe -eq 'E2E-CHECKPOINT-INVALID' -and $resolverEvidence.WrongCase -eq 'E2E-HARNESS-CHECKPOINT-001' -and $resolverEvidence.MaliciousCandidate -eq 'E2E-HARNESS-CHECKPOINT-001') -Name 'Harness resolver preserves only exact allowlisted codes and never reflects exception text'
+
+$postconditionSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2EPostconditionErrorCode'
+$postconditionCaseSource = @(
+    $postconditionSource,
+    '$result = [ordered]@{',
+    '    installationSucceeded = $true',
+    '    provenanceReceiptValidated = $true',
+    '    slackPluginVerified = $true',
+    '    installedVersion = ''2026.7.1''',
+    '    targetVersion = ''2026.7.1''',
+    '}',
+    '$result[''installationSucceeded''] = $false',
+    '$installationCode = Get-OpenClawE2EPostconditionErrorCode -Result $result',
+    '$result[''installationSucceeded''] = $true',
+    '$result[''provenanceReceiptValidated''] = $false',
+    '$result[''slackPluginVerified''] = $false',
+    '$provenanceCode = Get-OpenClawE2EPostconditionErrorCode -Result $result',
+    '$result[''provenanceReceiptValidated''] = $true',
+    '$result[''slackPluginVerified''] = $true',
+    '$result[''installedVersion''] = ''C:\Users\runneradmin\secret'' + [Environment]::NewLine + ''token''',
+    '$versionCode = Get-OpenClawE2EPostconditionErrorCode -Result $result',
+    '$result[''installedVersion''] = $result[''targetVersion'']',
+    '$result[''slackPluginVerified''] = $false',
+    '$slackCode = Get-OpenClawE2EPostconditionErrorCode -Result $result',
+    '$result[''slackPluginVerified''] = $true',
+    '$fallbackCode = Get-OpenClawE2EPostconditionErrorCode -Result $result',
+    '[pscustomobject]@{',
+    '    Codes = @($installationCode, $provenanceCode, $versionCode, $slackCode, $fallbackCode)',
+    '}'
+) -join [Environment]::NewLine
+$postconditionEvidence = & ([scriptblock]::Create($postconditionCaseSource))
+$expectedPostconditionCodes = @(
+    'E2E-POSTCONDITION-INSTALLATION-FAILED',
+    'E2E-POSTCONDITION-PROVENANCE-FAILED',
+    'E2E-POSTCONDITION-PROVENANCE-FAILED',
+    'E2E-SLACK-VERIFICATION-FAILED',
+    'E2E-POSTCONDITION-FAILED'
+)
+Assert-True -Condition (($postconditionEvidence.Codes -join ',') -eq ($expectedPostconditionCodes -join ',')) -Name 'PowerShell 5.1 deterministically classifies causal hosted E2E postconditions'
+$unsafePostconditionCodes = @($postconditionEvidence.Codes | Where-Object {
+    [string]$_ -notmatch '^E2E-[A-Z0-9-]{1,64}$'
+})
+Assert-True -Condition ($unsafePostconditionCodes.Count -eq 0) -Name 'Postcondition classification never reflects paths, secrets, or raw values'
 
 Assert-True -Condition ($worker.Contains('-SkipOnboarding') -and $worker.Contains('-Confirm:$false')) -Name 'Worker skips token entry and binds noninteractive confirmation as a Boolean'
 Assert-True -Condition ($worker.Contains('& $entryPoint') -and -not $controller.Contains('-Confirm:$false')) -Name 'Worker evaluates confirmation inside PowerShell instead of a native argument string'

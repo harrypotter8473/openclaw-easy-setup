@@ -144,6 +144,30 @@ function Resolve-OpenClawE2EHarnessErrorCode {
     }
     return Get-OpenClawE2EUnknownHarnessCode -Phase $Phase
 }
+
+function Get-OpenClawE2EPostconditionErrorCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Result
+    )
+
+    if (-not [bool]$Result['installationSucceeded']) {
+        return 'E2E-POSTCONDITION-INSTALLATION-FAILED'
+    }
+    if (-not [bool]$Result['provenanceReceiptValidated'] -or
+        -not [string]::Equals(
+            [string]$Result['installedVersion'],
+            [string]$Result['targetVersion'],
+            [StringComparison]::Ordinal
+        )) {
+        return 'E2E-POSTCONDITION-PROVENANCE-FAILED'
+    }
+    if (-not [bool]$Result['slackPluginVerified']) {
+        return 'E2E-SLACK-VERIFICATION-FAILED'
+    }
+    return 'E2E-POSTCONDITION-FAILED'
+}
+
 function Get-OpenClawE2ECheckpointEvidence {
     param(
         [Parameter(Mandatory = $true)]
@@ -642,7 +666,7 @@ try {
         $result.slackPluginVerified -and
         [string]$result.installedVersion -eq [string]$result.targetVersion
     if (-not $result.success -and [string]::IsNullOrWhiteSpace([string]$result.errorCode)) {
-        $result.errorCode = 'E2E-POSTCONDITION-FAILED'
+        $result.errorCode = Get-OpenClawE2EPostconditionErrorCode -Result $result
     }
 }
 catch {
