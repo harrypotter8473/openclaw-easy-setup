@@ -254,6 +254,10 @@ function Get-OpenClawE2EInstallFailureCode {
         'Npm registry authentication failure.' { return 'E2E-INSTALL-NPM-REGISTRY-AUTH-FAILED' }
         'Npm TLS failure.' { return 'E2E-INSTALL-NPM-TLS-FAILED' }
         'Npm protocol failure.' { return 'E2E-INSTALL-NPM-PROTOCOL-FAILED' }
+        'Npm diagnostics unavailable.' { return 'E2E-INSTALL-NPM-DIAGNOSTIC-UNAVAILABLE' }
+        'Npm diagnostic file rejected.' { return 'E2E-INSTALL-NPM-DIAGNOSTIC-FILE-REJECTED' }
+        'Npm install log missing or ambiguous.' { return 'E2E-INSTALL-NPM-DIAGNOSTIC-LOG-MISSING-OR-AMBIGUOUS' }
+        'Npm failure evidence unclassified.' { return 'E2E-INSTALL-NPM-DIAGNOSTIC-EVIDENCE-UNCLASSIFIED' }
         default { return 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH' }
     }
 }
@@ -523,7 +527,11 @@ $safeInstallFailureCodes = @(
     'E2E-INSTALL-NPM-DEPENDENCY-RESOLUTION-FAILED',
     'E2E-INSTALL-NPM-REGISTRY-AUTH-FAILED',
     'E2E-INSTALL-NPM-TLS-FAILED',
-    'E2E-INSTALL-NPM-PROTOCOL-FAILED'
+    'E2E-INSTALL-NPM-PROTOCOL-FAILED',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-UNAVAILABLE',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-FILE-REJECTED',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-LOG-MISSING-OR-AMBIGUOUS',
+    'E2E-INSTALL-NPM-DIAGNOSTIC-EVIDENCE-UNCLASSIFIED'
 )
 
 $safeHarnessCodes = @(

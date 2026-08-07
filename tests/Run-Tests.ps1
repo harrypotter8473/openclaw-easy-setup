@@ -524,24 +524,42 @@ exit 0
 
     $invokeNpmFailureClassifier = {
         param(
-            [string[]]$Lines,
+            [AllowEmptyCollection()]
+            [string[]]$Lines = @(),
             [string[]]$SecondLines = @(),
-            [string]$SecondLogName = '2026-08-07T07_00_01_000Z-debug-0.log'
+            [string]$FirstLogName = '2026-08-07T07_00_00_000Z-debug-0.log',
+            [string]$SecondLogName = '2026-08-07T07_00_01_000Z-debug-0.log',
+            [switch]$NoLogs,
+            [switch]$NoLogDirectory,
+            [switch]$ReturnEvidence
         )
 
         $workingRoot = Join-Path $exactTemporaryTestRoot ("OpenClawEasySetup-{0}" -f ([guid]::NewGuid().ToString('N')))
         $cacheRoot = Join-Path $workingRoot 'npm-cache'
         $logRoot = Join-Path $cacheRoot '_logs'
-        [void][IO.Directory]::CreateDirectory($logRoot)
-        [IO.File]::WriteAllText((Join-Path $logRoot '2026-08-07T07_00_00_000Z-debug-0.log'), (($Lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
-        if (@($SecondLines).Count -gt 0) {
-            [IO.File]::WriteAllText((Join-Path $logRoot $SecondLogName), (($SecondLines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+        [void][IO.Directory]::CreateDirectory($cacheRoot)
+        if (-not $NoLogDirectory) {
+            [void][IO.Directory]::CreateDirectory($logRoot)
+            if (-not $NoLogs) {
+                [IO.File]::WriteAllText((Join-Path $logRoot $FirstLogName), (($Lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+            }
+            if (@($SecondLines).Count -gt 0) {
+                [IO.File]::WriteAllText((Join-Path $logRoot $SecondLogName), (($SecondLines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+            }
         }
         try {
             return & $openClawModule {
-                param($workingRootValue, $cacheRootValue)
-                Get-OpenClawPinnedInstallerNpmFailureDetail -WorkingDirectory $workingRootValue -NpmCachePath $cacheRootValue
-            } $workingRoot $cacheRoot
+                param($workingRootValue, $cacheRootValue, [bool]$returnEvidenceValue)
+                $diagnosticStage = 'PRESEEDED'
+                $detail = Get-OpenClawPinnedInstallerNpmFailureDetail `
+                    -WorkingDirectory $workingRootValue `
+                    -NpmCachePath $cacheRootValue `
+                    -DiagnosticStage ([ref]$diagnosticStage)
+                if ($returnEvidenceValue) {
+                    return [pscustomobject]@{ Detail = $detail; DiagnosticStage = $diagnosticStage }
+                }
+                return $detail
+            } $workingRoot $cacheRoot ([bool]$ReturnEvidence)
         }
         finally {
             if (Test-Path -LiteralPath $workingRoot -PathType Container) {
@@ -578,6 +596,73 @@ exit 0
     })
     Assert-True -Condition (($npmFailureDetails -join ',') -eq (($npmFailureCases.Detail) -join ',')) -Name 'Private npm debug logs map only exact known failure codes to fixed details'
     Assert-True -Condition (-not (($npmFailureDetails -join ',').Contains('runneradmin')) -and -not (($npmFailureDetails -join ',').Contains('npm_token'))) -Name 'Private npm failure classification never returns raw paths or token fragments'
+
+    $knownNpmEvidence = & $invokeNpmFailureClassifier -Lines @(
+        '0 verbose title npm install openclaw@2026.7.1',
+        '1 error code EACCES',
+        '2 verbose exit 1',
+        '3 verbose code 1'
+    ) -ReturnEvidence
+    Assert-True -Condition ($knownNpmEvidence.Detail -eq 'Npm permission failure.' -and [string]::IsNullOrWhiteSpace($knownNpmEvidence.DiagnosticStage)) -Name 'Known causal npm evidence clears the diagnostic stage'
+
+    $longMetadataEvidence = & $invokeNpmFailureClassifier -Lines @(
+        '0 verbose title npm install openclaw@2026.7.1',
+        ('1 silly metadata ' + ('A' * 5000)),
+        '2 error code EACCES',
+        '3 verbose exit 1',
+        '4 verbose code 1'
+    ) -ReturnEvidence
+    Assert-True -Condition ($longMetadataEvidence.Detail -eq 'Npm permission failure.' -and [string]::IsNullOrWhiteSpace($longMetadataEvidence.DiagnosticStage)) -Name 'Oversized non-structural npm metadata is skipped without hiding exact causal evidence'
+
+    $overlongReservedEvidence = & $invokeNpmFailureClassifier -Lines @(
+        '0 verbose title npm install openclaw@2026.7.1',
+        ('1 error code EACCES ' + ('A' * 5000)),
+        '2 verbose exit 1',
+        '3 verbose code 1'
+    ) -ReturnEvidence
+    Assert-True -Condition ([string]::IsNullOrWhiteSpace($overlongReservedEvidence.Detail) -and $overlongReservedEvidence.DiagnosticStage -eq 'FileRejected') -Name 'Oversized reserved npm structure fails closed'
+
+    $controlLineStages = @(
+        foreach ($controlCharacter in @([char]0, [char]27, [char]0x202E)) {
+            $controlEvidence = & $invokeNpmFailureClassifier -Lines @(
+                '0 verbose title npm install openclaw@2026.7.1',
+                ('1 silly metadata ' + ('A' * 1100) + [string]$controlCharacter),
+                '2 error code EACCES',
+                '3 verbose exit 1',
+                '4 verbose code 1'
+            ) -ReturnEvidence
+            [string]$controlEvidence.DiagnosticStage
+        }
+    )
+    Assert-True -Condition (@($controlLineStages | Where-Object { $_ -ne 'FileRejected' }).Count -eq 0) -Name 'NUL, escape, and bidirectional controls reject npm diagnostic files before long-line skipping'
+
+    $missingDirectoryEvidence = & $invokeNpmFailureClassifier -NoLogDirectory -ReturnEvidence
+    $emptyDirectoryEvidence = & $invokeNpmFailureClassifier -NoLogs -ReturnEvidence
+    $invalidFileEvidence = & $invokeNpmFailureClassifier `
+        -Lines @('0 verbose title npm install openclaw@2026.7.1', '1 error code EACCES', '2 verbose exit 1', '3 verbose code 1') `
+        -FirstLogName 'invalid-debug.log' `
+        -ReturnEvidence
+    $missingInstallLogEvidence = & $invokeNpmFailureClassifier -Lines @('0 verbose cli C:\Program Files\nodejs\node.exe') -ReturnEvidence
+    $unclassifiedEvidence = & $invokeNpmFailureClassifier -Lines @(
+        '0 verbose title npm install openclaw@2026.7.1',
+        '1 error code ECUSTOM',
+        '2 verbose exit 1',
+        '3 verbose code 1'
+    ) -ReturnEvidence
+    $successfulEvidence = & $invokeNpmFailureClassifier -Lines @(
+        '0 verbose title npm install openclaw@2026.7.1',
+        '1 warn Unknown cli config "--min-release-age".',
+        '2 verbose exit 0',
+        '3 info ok'
+    ) -ReturnEvidence
+    Assert-True -Condition ($missingDirectoryEvidence.DiagnosticStage -eq 'Unavailable' -and
+        $emptyDirectoryEvidence.DiagnosticStage -eq 'Unavailable' -and
+        $invalidFileEvidence.DiagnosticStage -eq 'FileRejected' -and
+        $missingInstallLogEvidence.DiagnosticStage -eq 'InstallLogMissingOrAmbiguous' -and
+        $unclassifiedEvidence.DiagnosticStage -eq 'EvidenceUnclassified' -and
+        [string]::IsNullOrWhiteSpace($successfulEvidence.Detail) -and
+        [string]::IsNullOrWhiteSpace($successfulEvidence.DiagnosticStage)) -Name 'Npm diagnostic stages distinguish unavailable, rejected, ambiguous, unclassified, and successful evidence'
+    Assert-True -Condition ($missingDirectoryEvidence.DiagnosticStage -ne 'PRESEEDED') -Name 'Npm diagnostic stage output is reset before classification'
 
     $numericLifecycleDetail = & $invokeNpmFailureClassifier -Lines @(
         '0 verbose title npm install openclaw@2026.7.1',
@@ -672,15 +757,43 @@ exit 0
         [string]::IsNullOrWhiteSpace($successfulWarningDetail) -and
         [string]::IsNullOrWhiteSpace($invalidRootDetail)) -Name 'Ambiguous, malformed, conflicting, successful, or discontinuous npm evidence fails closed'
 
-    $knownNpmDetails = @($npmFailureCases.Detail)
+    $fixedDiagnosticDetails = @(
+        'Npm diagnostics unavailable.',
+        'Npm diagnostic file rejected.',
+        'Npm install log missing or ambiguous.',
+        'Npm failure evidence unclassified.'
+    )
+    $failureResolutionEvidence = & $openClawModule {
+        param([string[]]$ExpectedDiagnosticDetails)
+        $diagnosticStages = @('Unavailable', 'FileRejected', 'InstallLogMissingOrAmbiguous', 'EvidenceUnclassified')
+        $both = Resolve-OpenClawPinnedInstallerFailureDetail -CausalDetail 'Npm filesystem failure.' -DiagnosticStage 'EvidenceUnclassified'
+        $unknownStage = Resolve-OpenClawPinnedInstallerFailureDetail -DiagnosticStage ('Unavailable' + [Environment]::NewLine + 'token')
+        $unknownCausal = Resolve-OpenClawPinnedInstallerFailureDetail -CausalDetail ('Npm filesystem failure.' + [Environment]::NewLine + 'token')
+        [pscustomobject]@{
+            MappedDiagnosticDetails = @($diagnosticStages | ForEach-Object { Get-OpenClawPinnedInstallerDiagnosticDetail -DiagnosticStage $_ })
+            KnownCausal = Resolve-OpenClawPinnedInstallerFailureDetail -CausalDetail 'Npm filesystem failure.'
+            KnownDiagnostic = Resolve-OpenClawPinnedInstallerFailureDetail -DiagnosticStage 'EvidenceUnclassified'
+            BothCheckpoint = Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode 1 -FailureDetail $both
+            UnknownStageCheckpoint = Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode 1 -FailureDetail $unknownStage
+            UnknownCausalCheckpoint = Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode 1 -FailureDetail $unknownCausal
+        }
+    } $fixedDiagnosticDetails
+    Assert-True -Condition (($failureResolutionEvidence.MappedDiagnosticDetails -join ',') -eq ($fixedDiagnosticDetails -join ',') -and
+        $failureResolutionEvidence.KnownCausal -eq 'Npm filesystem failure.' -and
+        $failureResolutionEvidence.KnownDiagnostic -eq 'Npm failure evidence unclassified.' -and
+        $failureResolutionEvidence.BothCheckpoint -eq 'Exit code 1' -and
+        $failureResolutionEvidence.UnknownStageCheckpoint -eq 'Exit code 1' -and
+        $failureResolutionEvidence.UnknownCausalCheckpoint -eq 'Exit code 1') -Name 'Failure detail resolution accepts only one exact causal or diagnostic value and otherwise falls back generically'
+
+    $knownInstallerDetails = @($npmFailureCases.Detail) + $fixedDiagnosticDetails
     $checkpointDetailEvidence = & $openClawModule {
         param([string[]]$KnownDetails)
         [pscustomobject]@{
             Known = @($KnownDetails | ForEach-Object { Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode 1 -FailureDetail $_ })
             Unknown = Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode 1 -FailureDetail ("Npm network failure.`nC:\Users\runneradmin\secret")
         }
-    } $knownNpmDetails
-    Assert-True -Condition (($checkpointDetailEvidence.Known -join ',') -eq ($knownNpmDetails -join ',') -and $checkpointDetailEvidence.Unknown -eq 'Exit code 1') -Name 'Checkpoint detail sink accepts only exact fixed npm details'
+    } $knownInstallerDetails
+    Assert-True -Condition (($checkpointDetailEvidence.Known -join ',') -eq ($knownInstallerDetails -join ',') -and $checkpointDetailEvidence.Unknown -eq 'Exit code 1') -Name 'Checkpoint detail sink accepts only exact fixed npm causal and diagnostic details'
     $failureDetailInstallerScript = @'
 param([switch]$NoOnboard, [string]$InstallMethod, [string]$Tag, [switch]$DryRun)
 $logRoot = Join-Path $env:NPM_CONFIG_CACHE '_logs'
@@ -712,6 +825,38 @@ exit 1
         }
     } $syntheticInstallerPath $syntheticInstallerSource $trustedPowerShellPath
     Assert-True -Condition (@($failureDetailWrapperEvidence.ExitResults).Count -eq 1 -and $failureDetailWrapperEvidence.ExitResults[0].GetType() -eq [int] -and $failureDetailWrapperEvidence.ExitResults[0] -eq 1 -and $failureDetailWrapperEvidence.FailureDetail -eq 'Npm filesystem failure.') -Name 'Pinned installer wrapper preserves scalar exit and exports only fixed private-cache detail'
+
+    $unclassifiedInstallerScript = @(
+        'param([switch]$NoOnboard, [string]$InstallMethod, [string]$Tag, [switch]$DryRun)',
+        '$logRoot = Join-Path $env:NPM_CONFIG_CACHE ''_logs''',
+        '[void][IO.Directory]::CreateDirectory($logRoot)',
+        '$lines = @(',
+        '    ''0 verbose title npm install openclaw@2026.7.1'',',
+        '    ''1 error code ECUSTOM'',',
+        '    ''2 verbose exit 1'',',
+        '    ''3 verbose code 1''',
+        ')',
+        '[IO.File]::WriteAllText((Join-Path $logRoot ''2026-08-07T07_00_03_000Z-debug-0.log''), (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))',
+        'exit 1'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($syntheticInstallerPath, $unclassifiedInstallerScript, (New-Object Text.UTF8Encoding($false)))
+    $unclassifiedWrapperEvidence = & $openClawModule {
+        param($installerPathValue, $sourceConfigValue, $snapshotPathValue)
+        $originalSnapshotResolver = (Get-Command Get-OpenClawCommandSnapshot -CommandType Function).ScriptBlock
+        Set-Item -LiteralPath Function:\script:Get-OpenClawCommandSnapshot -Value {
+            param([string]$Name)
+            [pscustomobject]@{ Found = $true; Trusted = $true; ExitCode = 0; Version = [version]'26.5.1'; Path = $snapshotPathValue }
+        }
+        try {
+            $failureDetail = ''
+            $exitResults = @(Invoke-OpenClawPinnedInstallerFile -InstallerPath $installerPathValue -SourceConfig $sourceConfigValue -DryRun -FailureDetail ([ref]$failureDetail))
+            [pscustomobject]@{ ExitResults = $exitResults; FailureDetail = $failureDetail }
+        }
+        finally {
+            Set-Item -LiteralPath Function:\script:Get-OpenClawCommandSnapshot -Value $originalSnapshotResolver
+        }
+    } $syntheticInstallerPath $syntheticInstallerSource $trustedPowerShellPath
+    Assert-True -Condition (@($unclassifiedWrapperEvidence.ExitResults).Count -eq 1 -and $unclassifiedWrapperEvidence.ExitResults[0].GetType() -eq [int] -and $unclassifiedWrapperEvidence.ExitResults[0] -eq 1 -and $unclassifiedWrapperEvidence.FailureDetail -eq 'Npm failure evidence unclassified.') -Name 'Pinned installer wrapper exports a fixed unclassified diagnostic without raw npm evidence'
     Remove-Item -LiteralPath $syntheticInstallerPath -Force
 
     $sourceFingerprint = 'A' * 64

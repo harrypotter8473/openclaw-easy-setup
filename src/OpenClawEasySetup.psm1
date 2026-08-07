@@ -1863,10 +1863,19 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
         [string]$WorkingDirectory,
 
         [Parameter(Mandatory = $true)]
-        [string]$NpmCachePath
+        [string]$NpmCachePath,
+
+        [ref]$DiagnosticStage
     )
 
+    if ($null -ne $DiagnosticStage) {
+        $DiagnosticStage.Value = ''
+    }
+
     try {
+        if ($null -ne $DiagnosticStage) {
+            $DiagnosticStage.Value = 'FileRejected'
+        }
         $workingPath = [IO.Path]::GetFullPath($WorkingDirectory)
         $cachePath = [IO.Path]::GetFullPath($NpmCachePath)
         $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -1888,8 +1897,13 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
         }
 
         $logDirectoryPath = [IO.Path]::GetFullPath((Join-Path $cachePath '_logs'))
-        if (-not [string]::Equals((Split-Path -Parent $logDirectoryPath), $cachePath, [StringComparison]::OrdinalIgnoreCase) -or
-            -not (Test-Path -LiteralPath $logDirectoryPath -PathType Container)) {
+        if (-not [string]::Equals((Split-Path -Parent $logDirectoryPath), $cachePath, [StringComparison]::OrdinalIgnoreCase)) {
+            return ''
+        }
+        if (-not (Test-Path -LiteralPath $logDirectoryPath -PathType Container)) {
+            if ($null -ne $DiagnosticStage) {
+                $DiagnosticStage.Value = 'Unavailable'
+            }
             return ''
         }
         $logDirectoryItem = Get-Item -LiteralPath $logDirectoryPath -Force -ErrorAction Stop
@@ -1899,7 +1913,13 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
         }
 
         $logEntries = @(Get-ChildItem -LiteralPath $logDirectoryPath -Force -ErrorAction Stop)
-        if ($logEntries.Count -lt 1 -or $logEntries.Count -gt 16) {
+        if ($logEntries.Count -lt 1) {
+            if ($null -ne $DiagnosticStage) {
+                $DiagnosticStage.Value = 'Unavailable'
+            }
+            return ''
+        }
+        if ($logEntries.Count -gt 16) {
             return ''
         }
 
@@ -1926,10 +1946,13 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
                     UnknownErrorCode = $false
                     NumericCodeOne = $false
                     CommandFailed = $false
+                    InfoOkCount = 0
                     VerboseExitCount = 0
                     VerboseExitValues = @{}
                     VerboseCodeCount = 0
                     VerboseCodeValues = @{}
+                    FailedExit = $false
+                    SuccessfulExit = $false
                 }
             }
             $logGroup = $logGroups[$runKey]
@@ -1956,13 +1979,15 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
                 $reader = New-Object IO.StreamReader($stream, $strictUtf8, $false, 4096, $true)
                 try {
                     while (($line = $reader.ReadLine()) -ne $null) {
-                        if ($line.Length -gt 4096 -or
-                            $line.IndexOf([char]0) -ge 0 -or
+                        if ($line.IndexOf([char]0) -ge 0 -or
                             $line.IndexOf([char]27) -ge 0 -or
                             $line -match '[\u202A-\u202E\u2066-\u2069]') {
                             return ''
                         }
                         if ($line.Length -gt 1024) {
+                            if ($line -cmatch '^\d{1,6} (?:error code|verbose title|verbose exit|verbose code|error command failed)(?:\s|$)') {
+                                return ''
+                            }
                             continue
                         }
                         if ($line -cmatch '^\d{1,6} verbose title npm install(?: .{1,480})?$') {
@@ -2026,6 +2051,10 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
                             $logGroup.CommandFailed = $true
                             continue
                         }
+                        if ($line -cmatch '^\d{1,6} info ok$') {
+                            $logGroup.InfoOkCount++
+                            continue
+                        }
                     }
                 }
                 finally {
@@ -2037,7 +2066,6 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
             }
         }
 
-        $candidateLogs = @()
         foreach ($logGroup in $logGroups.Values) {
             $segments = @($logGroup.Segments.Keys | Sort-Object)
             if ($segments.Count -lt 1 -or $segments.Count -gt 5 -or $segments[0] -ne 0) {
@@ -2048,11 +2076,18 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
                     return ''
                 }
             }
+        }
+
+        if ($null -ne $DiagnosticStage) {
+            $DiagnosticStage.Value = 'InstallLogMissingOrAmbiguous'
+        }
+        $candidateLogs = @()
+        foreach ($logGroup in $logGroups.Values) {
             if ($logGroup.TitleCount -gt 1) {
                 return ''
             }
             if ($logGroup.TitleCount -eq 1) {
-                $logGroup | Add-Member -NotePropertyName FailedExit -NotePropertyValue (
+                $logGroup.FailedExit = (
                     $logGroup.VerboseExitCount -eq 1 -and
                     $logGroup.VerboseExitValues.Count -eq 1 -and
                     $logGroup.VerboseExitValues.ContainsKey('1') -and
@@ -2060,12 +2095,23 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
                     $logGroup.VerboseCodeValues.Count -eq 1 -and
                     $logGroup.VerboseCodeValues.ContainsKey('1')
                 )
+                $logGroup.SuccessfulExit = (
+                    $logGroup.VerboseExitCount -eq 1 -and
+                    $logGroup.VerboseExitValues.Count -eq 1 -and
+                    $logGroup.VerboseExitValues.ContainsKey('0') -and
+                    $logGroup.VerboseCodeCount -eq 0 -and
+                    $logGroup.VerboseCodeValues.Count -eq 0 -and
+                    $logGroup.InfoOkCount -eq 1
+                )
                 $candidateLogs += $logGroup
             }
         }
 
         if ($candidateLogs.Count -ne 1) {
             return ''
+        }
+        if ($null -ne $DiagnosticStage) {
+            $DiagnosticStage.Value = 'EvidenceUnclassified'
         }
         $candidate = $candidateLogs[0]
         if ($candidate.UnknownErrorCode) {
@@ -2079,17 +2125,73 @@ function Get-OpenClawPinnedInstallerNpmFailureDetail {
             if (-not $candidate.FailedExit) {
                 return ''
             }
+            if ($null -ne $DiagnosticStage) {
+                $DiagnosticStage.Value = ''
+            }
             return [string]$categoryNames[0]
         }
         if ($candidate.CommandFailed) {
             if ($candidate.FailedExit -and $candidate.NumericCodeOne) {
+                if ($null -ne $DiagnosticStage) {
+                    $DiagnosticStage.Value = ''
+                }
                 return 'Npm lifecycle failure.'
+            }
+            return ''
+        }
+        if ($candidate.SuccessfulExit -and -not $candidate.NumericCodeOne) {
+            if ($null -ne $DiagnosticStage) {
+                $DiagnosticStage.Value = ''
             }
             return ''
         }
     }
     catch {
+        if ($null -ne $DiagnosticStage) {
+            $DiagnosticStage.Value = 'FileRejected'
+        }
         return ''
+    }
+    return ''
+}
+
+function Get-OpenClawPinnedInstallerDiagnosticDetail {
+    param(
+        [AllowEmptyString()]
+        [string]$DiagnosticStage = ''
+    )
+
+    switch -CaseSensitive ($DiagnosticStage) {
+        'Unavailable' { return 'Npm diagnostics unavailable.' }
+        'FileRejected' { return 'Npm diagnostic file rejected.' }
+        'InstallLogMissingOrAmbiguous' { return 'Npm install log missing or ambiguous.' }
+        'EvidenceUnclassified' { return 'Npm failure evidence unclassified.' }
+        default { return '' }
+    }
+}
+
+function Resolve-OpenClawPinnedInstallerFailureDetail {
+    param(
+        [AllowEmptyString()]
+        [string]$CausalDetail = '',
+
+        [AllowEmptyString()]
+        [string]$DiagnosticStage = ''
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($CausalDetail) -and
+        -not [string]::IsNullOrWhiteSpace($DiagnosticStage)) {
+        return ''
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CausalDetail)) {
+        $validatedCausalDetail = Get-OpenClawPinnedInstallerCheckpointDetail -ExitCode 1 -FailureDetail $CausalDetail
+        if (-not [string]::Equals($validatedCausalDetail, 'Exit code 1', [StringComparison]::Ordinal)) {
+            return $validatedCausalDetail
+        }
+        return ''
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DiagnosticStage)) {
+        return Get-OpenClawPinnedInstallerDiagnosticDetail -DiagnosticStage $DiagnosticStage
     }
     return ''
 }
@@ -2115,6 +2217,10 @@ function Get-OpenClawPinnedInstallerCheckpointDetail {
         'Npm registry authentication failure.' { return 'Npm registry authentication failure.' }
         'Npm TLS failure.' { return 'Npm TLS failure.' }
         'Npm protocol failure.' { return 'Npm protocol failure.' }
+        'Npm diagnostics unavailable.' { return 'Npm diagnostics unavailable.' }
+        'Npm diagnostic file rejected.' { return 'Npm diagnostic file rejected.' }
+        'Npm install log missing or ambiguous.' { return 'Npm install log missing or ambiguous.' }
+        'Npm failure evidence unclassified.' { return 'Npm failure evidence unclassified.' }
         default { return ("Exit code {0}" -f $ExitCode) }
     }
 }
@@ -2245,15 +2351,14 @@ function Invoke-OpenClawPinnedInstallerFile {
             & $hostPath @arguments | Out-Host
             $installerExitCode = [int]$LASTEXITCODE
             if ($installerExitCode -eq 1 -and $null -ne $FailureDetail) {
+                $diagnosticStage = ''
                 $classifiedDetail = Get-OpenClawPinnedInstallerNpmFailureDetail `
                     -WorkingDirectory $safeWorkingDirectory `
-                    -NpmCachePath $safeNpmCache
-                $FailureDetail.Value = Get-OpenClawPinnedInstallerCheckpointDetail `
-                    -ExitCode $installerExitCode `
-                    -FailureDetail $classifiedDetail
-                if ([string]::Equals([string]$FailureDetail.Value, 'Exit code 1', [StringComparison]::Ordinal)) {
-                    $FailureDetail.Value = ''
-                }
+                    -NpmCachePath $safeNpmCache `
+                    -DiagnosticStage ([ref]$diagnosticStage)
+                $FailureDetail.Value = Resolve-OpenClawPinnedInstallerFailureDetail `
+                    -CausalDetail $classifiedDetail `
+                    -DiagnosticStage $diagnosticStage
             }
             return $installerExitCode
         }
