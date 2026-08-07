@@ -188,7 +188,7 @@ Assert-True -Condition ($workflow.Contains('${{ runner.temp }}\OpenClawEasySetup
 Assert-True -Condition (([regex]::Matches($workflow, 'OCES_E2E_RESULT: \$\{\{ runner\.temp \}\}\\OpenClawEasySetup-GitHubE2E\\result\.json')).Count -eq 2 -and $workflow -notmatch '(?m)^      OCES_E2E_RESULT:') -Name 'Runner context is referenced only from step-level environments'
 Assert-True -Condition ($workflow.Contains('${{ steps.install_e2e.outcome }}') -and $workflow.Contains('E2E-RESULT-INVALID')) -Name 'Summary cannot report PASS when the controller failed or the receipt is invalid'
 Assert-True -Condition ($workflow.Contains('[IO.FileAttributes]::ReparsePoint') -and $workflow.Contains('^(OCES|E2E)-[A-Z0-9-]{1,64}$')) -Name 'Summary validates receipt type and fixed output formats before rendering'
-Assert-True -Condition ($workflow.Contains("throw 'E2E-SUMMARY-FAIL-CLOSED'") -and $workflow.Contains('$stages.Count -eq $expectedStageIds.Count')) -Name 'Missing or incomplete evidence makes the summary step fail closed'
+Assert-True -Condition ($workflow.Contains("throw 'E2E-SUMMARY-FAIL-CLOSED'") -and $workflow.Contains("`$status -ne 'PASS' -and `$env:OCES_E2E_OUTCOME -eq 'success'") -and $workflow.Contains('$stages.Count -eq $expectedStageIds.Count')) -Name 'Missing or incomplete evidence fails closed unless the controller already failed'
 Assert-True -Condition ($workflow.Contains('$installedVersion -eq $targetVersion') -and $workflow.Contains('$result.installationSucceeded -eq $true') -and $workflow.Contains('$candidateErrorCode -eq ''''')) -Name 'PASS requires exact versions and every independent postcondition'
 
 Assert-True -Condition ($controller.Contains('$env:RUNNER_ENVIRONMENT -ne ''github-hosted''') -and $controller.Contains('$env:GITHUB_EVENT_NAME -ne ''workflow_dispatch''')) -Name 'Controller refuses local and non-manual execution'
@@ -216,7 +216,8 @@ Assert-True -Condition ($controller.Contains('Get-OpenClawE2EInstallFailureCode'
     $controller.Contains('E2E-INSTALL-SLACK-PLUGIN-FAILED')) -Name 'Validated install details can refine only allowlisted checkpoint diagnostics'
 $installProducerPatterns = @(
     '-StepId ''install'' -Status ''Failed'' -Detail ''Installer invocation failure.''',
-    '-StepId ''install'' -Status ''Failed'' -Detail ''Postcondition failure.''',
+    '$installPostconditionDetail = Get-OpenClawInstallPostconditionDetail -Snapshot $installed -TargetVersion $targetVersion',
+    '-StepId ''install'' -Status ''Failed'' -Detail $installPostconditionDetail',
     '-StepId ''install'' -Status ''Failed'' -Detail ''Provenance receipt failure.''',
     '$installFailureDetail = ''''',
     '-FailureDetail ([ref]$installFailureDetail)',
@@ -230,8 +231,8 @@ $installProducerMatchCounts = @($installProducerPatterns | ForEach-Object {
     ([regex]::Matches($module, [regex]::Escape($_))).Count
 })
 $slackProducerPattern = '-StepId ''install'' -Status ''Failed'' -Detail ''Slack plugin provenance or installation failure.'''
-Assert-True -Condition (($installProducerMatchCounts -join ',') -eq '1,1,1,1,1,1,1,1,1,1' -and
-    ([regex]::Matches($module, [regex]::Escape($slackProducerPattern))).Count -eq 2) -Name 'Install checkpoint producers retain the exact classifier detail contract'
+Assert-True -Condition (($installProducerMatchCounts -join ',') -eq '1,1,1,1,1,1,1,1,1,1,1' -and
+    ([regex]::Matches($module, [regex]::Escape($slackProducerPattern))).Count -eq 2) -Name 'Install checkpoint producers retain exact fixed or classified detail contracts'
 Assert-True -Condition ($controller.Contains('Get-OpenClawE2EPostconditionErrorCode -Result $result') -and
     $controller.Contains('E2E-POSTCONDITION-INSTALLATION-FAILED') -and
     $controller.Contains('E2E-POSTCONDITION-PROVENANCE-FAILED') -and
@@ -584,6 +585,12 @@ $installFailureCaseSource = @(
     '    ''Exit code 1'',',
     '    ''Exit code 2'',',
     '    ''Postcondition failure.'',',
+    '    ''OpenClaw command missing after installation.'',',
+    '    ''OpenClaw command resolution ambiguous after installation.'',',
+    '    ''OpenClaw command provenance failure after installation.'',',
+    '    ''OpenClaw package inspection failure after installation.'',',
+    '    ''OpenClaw version metadata missing after installation.'',',
+    '    ''OpenClaw version mismatch after installation.'',',
     '    ''Provenance receipt failure.'',',
     '    ''Slack plugin provenance or installation failure.'',',
     '    ''Npm permission failure.'',',
@@ -603,7 +610,7 @@ $installFailureCaseSource = @(
     '    ''Npm install log missing or ambiguous.'',',
     '    ''Npm failure evidence unclassified.''',
     ')',
-    '$unknownDetails = @('''', ''Exit code 3'', ''installer invocation failure.'', (''Exit code 1'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''), (''Slack plugin provenance or installation failure.'' + [Environment]::NewLine + ''token''), (''Npm network failure.'' + [Environment]::NewLine + ''npm_token=synthetic''), (''Npm diagnostics unavailable.'' + [Environment]::NewLine + ''token''))',
+    '$unknownDetails = @('''', ''Exit code 3'', ''installer invocation failure.'', (''Exit code 1'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret''), (''OpenClaw command missing after installation.'' + [Environment]::NewLine + ''token''), (''Slack plugin provenance or installation failure.'' + [Environment]::NewLine + ''token''), (''Npm network failure.'' + [Environment]::NewLine + ''npm_token=synthetic''), (''Npm diagnostics unavailable.'' + [Environment]::NewLine + ''token''))',
     '[pscustomobject]@{',
     '    KnownCodes = @($knownDetails | ForEach-Object { Get-OpenClawE2EInstallFailureCode -Detail $_ })',
     '    UnknownCodes = @($unknownDetails | ForEach-Object { Get-OpenClawE2EInstallFailureCode -Detail $_ })',
@@ -615,6 +622,12 @@ $expectedInstallFailureCodes = @(
     'E2E-INSTALL-PINNED-INSTALLER-EXIT-1',
     'E2E-INSTALL-PINNED-INSTALLER-EXIT-2',
     'E2E-INSTALL-POSTCONDITION-FAILED',
+    'E2E-INSTALL-COMMAND-NOT-FOUND',
+    'E2E-INSTALL-COMMAND-AMBIGUOUS',
+    'E2E-INSTALL-COMMAND-UNTRUSTED',
+    'E2E-INSTALL-PACKAGE-INSPECTION-FAILED',
+    'E2E-INSTALL-VERSION-METADATA-MISSING',
+    'E2E-INSTALL-VERSION-MISMATCH',
     'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED',
     'E2E-INSTALL-SLACK-PLUGIN-FAILED',
     'E2E-INSTALL-NPM-PERMISSION-FAILED',
@@ -798,7 +811,10 @@ $successCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Rece
 Assert-True -Condition (-not $successCase.Threw -and $successCase.Summary.Contains('- Result: PASS') -and $successCase.Summary.Contains($testedCommit)) -Name 'Complete consistent evidence produces PASS'
 
 $missingCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $null -ControllerOutcome success -ExpectedCommit $testedCommit
-Assert-True -Condition ($missingCase.Threw -and $missingCase.Summary.Contains('- Result: FAIL')) -Name 'Missing receipt fails the summary step'
+Assert-True -Condition ($missingCase.Threw -and $missingCase.Summary.Contains('- Result: FAIL')) -Name 'Missing receipt after controller success fails the summary step'
+
+$missingFailureCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $null -ControllerOutcome failure -ExpectedCommit $testedCommit
+Assert-True -Condition (-not $missingFailureCase.Threw -and $missingFailureCase.Summary.Contains('- Result: FAIL') -and $missingFailureCase.Summary.Contains('(invalid receipt)')) -Name 'Missing receipt after controller failure still publishes a sanitized summary without redundant failure'
 
 $shortReceipt = [ordered]@{}
 foreach ($key in $successReceipt.Keys) {
@@ -833,7 +849,7 @@ $failureReceipt = [ordered]@{
     stages = @()
 }
 $failureCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $failureReceipt -ControllerOutcome failure -ExpectedCommit $testedCommit
-Assert-True -Condition ($failureCase.Threw -and $failureCase.Summary.Contains('- Result: FAIL') -and $failureCase.Summary.Contains('E2E-INSTALLER-FAILED')) -Name 'Valid installer failure keeps its sanitized error code while failing closed'
+Assert-True -Condition (-not $failureCase.Threw -and $failureCase.Summary.Contains('- Result: FAIL') -and $failureCase.Summary.Contains('E2E-INSTALLER-FAILED')) -Name 'Valid installer failure keeps its sanitized error code without a redundant summary-step failure'
 
 $otherCommit = ('b' * 40) -join ''
 $commitMismatchCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $successReceipt -ControllerOutcome success -ExpectedCommit $otherCommit
@@ -853,7 +869,7 @@ foreach ($key in $failureReceipt.Keys) {
 }
 $maliciousErrorReceipt['errorCode'] = 'E2E-HARNESS-CHECKPOINT-001' + [Environment]::NewLine + '- injected'
 $maliciousErrorCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $maliciousErrorReceipt -ControllerOutcome failure -ExpectedCommit $testedCommit
-Assert-True -Condition ($maliciousErrorCase.Threw -and $maliciousErrorCase.Summary.Contains('(invalid receipt)') -and -not $maliciousErrorCase.Summary.Contains('injected')) -Name 'Invalid harness error text cannot inject Markdown into the summary'
+Assert-True -Condition (-not $maliciousErrorCase.Threw -and $maliciousErrorCase.Summary.Contains('(invalid receipt)') -and -not $maliciousErrorCase.Summary.Contains('injected')) -Name 'Invalid harness error text cannot inject Markdown into a controller-failure summary'
 
 Write-Host ''
 Write-Host ("GitHub runner E2E contract tests: {0} passed, {1} failed" -f $script:Passed, $script:Failed)

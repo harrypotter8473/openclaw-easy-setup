@@ -240,6 +240,12 @@ function Get-OpenClawE2EInstallFailureCode {
         'Exit code 1' { return 'E2E-INSTALL-PINNED-INSTALLER-EXIT-1' }
         'Exit code 2' { return 'E2E-INSTALL-PINNED-INSTALLER-EXIT-2' }
         'Postcondition failure.' { return 'E2E-INSTALL-POSTCONDITION-FAILED' }
+        'OpenClaw command missing after installation.' { return 'E2E-INSTALL-COMMAND-NOT-FOUND' }
+        'OpenClaw command resolution ambiguous after installation.' { return 'E2E-INSTALL-COMMAND-AMBIGUOUS' }
+        'OpenClaw command provenance failure after installation.' { return 'E2E-INSTALL-COMMAND-UNTRUSTED' }
+        'OpenClaw package inspection failure after installation.' { return 'E2E-INSTALL-PACKAGE-INSPECTION-FAILED' }
+        'OpenClaw version metadata missing after installation.' { return 'E2E-INSTALL-VERSION-METADATA-MISSING' }
+        'OpenClaw version mismatch after installation.' { return 'E2E-INSTALL-VERSION-MISMATCH' }
         'Provenance receipt failure.' { return 'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED' }
         'Slack plugin provenance or installation failure.' { return 'E2E-INSTALL-SLACK-PLUGIN-FAILED' }
         'Npm permission failure.' { return 'E2E-INSTALL-NPM-PERMISSION-FAILED' }
@@ -514,6 +520,12 @@ $safeInstallFailureCodes = @(
     'E2E-INSTALL-PINNED-INSTALLER-EXIT-1',
     'E2E-INSTALL-PINNED-INSTALLER-EXIT-2',
     'E2E-INSTALL-POSTCONDITION-FAILED',
+    'E2E-INSTALL-COMMAND-NOT-FOUND',
+    'E2E-INSTALL-COMMAND-AMBIGUOUS',
+    'E2E-INSTALL-COMMAND-UNTRUSTED',
+    'E2E-INSTALL-PACKAGE-INSPECTION-FAILED',
+    'E2E-INSTALL-VERSION-METADATA-MISSING',
+    'E2E-INSTALL-VERSION-MISMATCH',
     'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED',
     'E2E-INSTALL-SLACK-PLUGIN-FAILED',
     'E2E-INSTALL-NPM-PERMISSION-FAILED',

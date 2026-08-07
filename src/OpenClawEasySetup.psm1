@@ -2229,6 +2229,36 @@ function Get-OpenClawPinnedInstallerCheckpointDetail {
     }
 }
 
+function Get-OpenClawInstallPostconditionDetail {
+    param(
+        [AllowNull()]
+        [object]$Snapshot,
+
+        [Parameter(Mandatory = $true)]
+        [version]$TargetVersion
+    )
+
+    if ($null -eq $Snapshot -or -not [bool]$Snapshot.Found) {
+        return 'OpenClaw command missing after installation.'
+    }
+    if ([bool]$Snapshot.Ambiguous) {
+        return 'OpenClaw command resolution ambiguous after installation.'
+    }
+    if (-not [bool]$Snapshot.Trusted) {
+        return 'OpenClaw command provenance failure after installation.'
+    }
+    if ($null -eq $Snapshot.ExitCode -or [int]$Snapshot.ExitCode -ne 0) {
+        return 'OpenClaw package inspection failure after installation.'
+    }
+    if ($null -eq $Snapshot.Version) {
+        return 'OpenClaw version metadata missing after installation.'
+    }
+    if ([version]$Snapshot.Version -ne $TargetVersion) {
+        return 'OpenClaw version mismatch after installation.'
+    }
+    return ''
+}
+
 function Invoke-OpenClawPinnedInstallerFile {
     [CmdletBinding()]
     param(
@@ -2284,6 +2314,15 @@ function Invoke-OpenClawPinnedInstallerFile {
     $emptyNpmGlobalConfig = Join-Path $safeWorkingDirectory 'empty.global.npmrc'
     $emptyGitConfig = Join-Path $safeWorkingDirectory 'empty.gitconfig'
     $safeNpmCache = Join-Path $safeWorkingDirectory 'npm-cache'
+    $roamingApplicationData = [string]$savedEnvironment['APPDATA']
+    if ([string]::IsNullOrWhiteSpace($roamingApplicationData)) {
+        throw 'The trusted per-user npm installation directory could not be determined.'
+    }
+    $trustedNpmPrefix = [IO.Path]::GetFullPath((Join-Path $roamingApplicationData 'npm'))
+    $roamingPrefix = [IO.Path]::GetFullPath($roamingApplicationData).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $trustedNpmPrefix.StartsWith($roamingPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The trusted npm installation directory left the current user profile.'
+    }
     [void][IO.Directory]::CreateDirectory($safeNpmCache)
     [IO.File]::WriteAllText($emptyNpmUserConfig, '', (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText($emptyNpmGlobalConfig, '', (New-Object Text.UTF8Encoding($false)))
@@ -2325,6 +2364,7 @@ function Invoke-OpenClawPinnedInstallerFile {
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $emptyNpmUserConfig, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $emptyNpmGlobalConfig, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_CACHE', $safeNpmCache, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFIX', $trustedNpmPrefix, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFER_OFFLINE', 'false', 'Process')
         [Environment]::SetEnvironmentVariable('GIT_CONFIG_NOSYSTEM', '1', 'Process')
         [Environment]::SetEnvironmentVariable('GIT_CONFIG_GLOBAL', $emptyGitConfig, 'Process')
@@ -2924,8 +2964,9 @@ function Install-OpenClawOfficial {
 
             Update-OpenClawProcessPath
             $installed = Get-OpenClawCommandSnapshot -Name 'openclaw'
-            if (-not $installed.Found -or -not $installed.Trusted -or $installed.Ambiguous -or $installed.ExitCode -ne 0 -or $null -eq $installed.Version -or $installed.Version -ne $targetVersion) {
-                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail 'Postcondition failure.'
+            $installPostconditionDetail = Get-OpenClawInstallPostconditionDetail -Snapshot $installed -TargetVersion $targetVersion
+            if (-not [string]::IsNullOrWhiteSpace($installPostconditionDetail)) {
+                $checkpoint = Set-OpenClawCheckpointStepBestEffort -Checkpoint $checkpoint -StepId 'install' -Status 'Failed' -Detail $installPostconditionDetail
                 throw (New-OpenClawTaggedException -Kind 'Install' -Message "Installed OpenClaw version did not match pinned target $targetVersion.")
             }
             try {

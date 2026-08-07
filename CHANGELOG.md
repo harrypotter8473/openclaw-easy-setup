@@ -55,6 +55,11 @@
 - Minimal seven-file runner staging with before/after SHA-256 checks, a credential-scrubbed environment, trusted Windows PATH, and empty npm/Git user configuration
 - A shared install-smoke worker that binds `-Confirm:$false` inside PowerShell instead of passing it as a native string
 
+### Fixed
+
+- Pin isolated npm global installs to the trusted per-user command root used by post-install provenance checks.
+- Publish sanitized hosted-runner failure summaries without adding a redundant second failed step.
+
 ### Security
 
 - API keys and tokens are not written as plaintext by the 0.4 easy-setup path; only SecretRefs are added to OpenClaw configuration.

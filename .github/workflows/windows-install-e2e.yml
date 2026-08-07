@@ -160,6 +160,6 @@ jobs:
           )
           $lines += $stageLines
           $lines | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Append
-          if ($status -ne 'PASS') {
+          if ($status -ne 'PASS' -and $env:OCES_E2E_OUTCOME -eq 'success') {
               throw 'E2E-SUMMARY-FAIL-CLOSED'
           }
