@@ -29,29 +29,36 @@ openclaw --profile easysetup-test gateway --port 19789
 
 이 방법은 이미 설치된 OpenClaw의 기능을 빠르게 시험하는 용도입니다. npm 전역 설치와 Windows PATH 같은 설치기 변경은 격리하지 않으며, `~/.openclaw-easysetup-test`의 시험 상태는 자동 삭제되지 않습니다. 공식 경로 규칙은 [고정 버전 환경 변수 문서](https://github.com/openclaw/openclaw/blob/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/docs/help/environment.md)와 [다중 Gateway 문서](https://github.com/openclaw/openclaw/blob/2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4/docs/gateway/multiple-gateways.md)를 기준으로 합니다.
 
-## 3. Windows Sandbox에서 실제 신규 설치
+## 3. 기본 자동 E2E: GitHub Actions 임시 Windows runner
 
-실제 신규 설치 전체 흐름은 Windows Sandbox가 가장 간단합니다. Sandbox는 호스트와 다른 Windows 사용자·파일 시스템·PATH·npm 설치 공간을 사용하고, 창을 닫으면 내부 프로그램과 자격 증명이 삭제됩니다.
+신규 설치 자동 검사의 기본 경로는 GitHub가 실행별로 제공하고 작업 뒤 폐기하는 임시 Windows runner입니다.
 
-요구 사항:
+워크플로 파일이 포함된 PR을 검토해 기본 브랜치에 병합한 뒤 실행합니다.
+1. 저장소의 `Actions` 탭을 엽니다.
+2. `Windows Install E2E`를 선택합니다.
+3. `Run workflow`를 눌러 수동 실행하고 Summary의 정제된 결과를 확인합니다.
 
-- Windows 10/11 Pro, Enterprise 또는 Education
-- BIOS 가상화와 Windows Sandbox 선택 기능
-- 실제 설치 다운로드를 위한 네트워크
+설치와 검증은 GitHub의 임시 머신에서만 실행됩니다. 사용자의 PC에서 Windows 기능·드라이버·가상화 설정을 바꾸거나 재부팅하지 않으며 API 키, 메신저 토큰 또는 저장소 secret을 전달하지 않습니다. 자세한 검사 범위와 결과 해석은 [GitHub 임시 Windows E2E 안내](github-hosted-windows-e2e.md)를 참고하세요.
 
-이 프로젝트는 Windows 기능을 자동으로 켜거나 PC를 자동 재부팅하지 않습니다. 기능이 꺼져 있다면 변경 내용을 검토한 뒤 관리자 PowerShell에서 다음 명령을 한 번 실행하고, Windows가 요청할 때 재부팅하세요.
+## 4. GUI 클릭 시험: 전용 Hyper-V VM
 
-```powershell
-Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All
-```
+버튼 클릭, 권한 확인 창, 재부팅, 설치 재개와 복구를 포함하는 GUI 시험은 깨끗한 Windows 체크포인트가 있는 전용 Hyper-V VM에서만 진행합니다. 운영용 API 키나 Slack 토큰을 사용하지 말고 시험용 자격 증명을 사용하세요. 이 프로젝트는 Hyper-V를 자동으로 활성화하거나 VM을 만들지 않습니다.
 
-### 화면을 직접 시험하기
+## 5. Windows Sandbox: 선택적 호환 경로
+
+Windows Sandbox는 기본 자동 E2E 또는 GUI 합격 판정 경로가 아닙니다. Sandbox가 이미 안정적으로 동작하는 별도 개발 PC에서만 선택적으로 사용할 수 있습니다.
+
+> 연결 경고가 다시 나타나거나 `다시 연결`이 반복되면 버튼을 계속 누르지 말고 Sandbox 창을 닫은 뒤 즉시 시험을 중단하세요. 같은 PC에서 반복 실행하거나 복구를 시도하지 말고 GitHub Actions 또는 전용 Hyper-V VM을 사용하세요.
+
+이 프로젝트는 Windows Sandbox 기능을 켜거나 복구하지 않으며 PC를 재부팅하지 않습니다. 기능이 꺼져 있거나 연결이 불안정하면 활성화를 시도하지 말고 GitHub Actions를 사용하세요.
+
+### 이미 안정적인 별도 PC에서 화면 시험
 
 ```powershell
 ./Start-OpenClawEasySetup.Sandbox.ps1 -Mode Gui
 ```
 
-실행기는 필요한 15개 런타임 파일만 호스트의 실행별 staging 폴더에 복사하고 SHA-256을 다시 확인한 뒤, 이 폴더만 `C:\OCES-Source`에 읽기 전용으로 연결합니다. `.git`, 문서, 로컬 환경 파일과 나머지 작업 폴더는 Sandbox에 노출하지 않습니다. 코드는 다시 Sandbox 내부의 쓰기 가능한 일회용 폴더로 복사된 뒤 GUI가 시작됩니다.
+실행기는 필요한 16개 런타임 파일만 호스트의 실행별 staging 폴더에 복사하고 SHA-256을 다시 확인한 뒤, 이 폴더만 `C:\OCES-Source`에 읽기 전용으로 연결합니다. `.git`, 문서, 로컬 환경 파일과 나머지 작업 폴더는 Sandbox에 노출하지 않습니다. 코드는 다시 Sandbox 내부의 쓰기 가능한 일회용 폴더로 복사된 뒤 GUI가 시작됩니다.
 
 ### 토큰 없이 실제 설치 단계 자동 검사하기
 

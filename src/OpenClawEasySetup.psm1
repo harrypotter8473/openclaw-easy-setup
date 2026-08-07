@@ -2668,6 +2668,7 @@ Export-ModuleMember -Function @(
     'Resolve-OpenClawInvocation',
     'Assert-OpenClawSlackPluginProvenance',
     'Assert-OpenClawSlackPluginInspection',
+    'Get-OpenClawSlackPluginInspection',
     'Start-OpenClawOnboarding',
     'Install-OpenClawOfficial',
     'Invoke-OpenClawVerification'

@@ -1,0 +1,163 @@
+name: Windows Install E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-install-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  install-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      OCES_E2E_RESULT: ${{ runner.temp }}\OpenClawEasySetup-GitHubE2E\result.json
+      OCES_E2E_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      OCES_E2E_EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Require default branch
+        if: github.ref_name != github.event.repository.default_branch
+        shell: powershell
+        run: throw 'E2E-DEFAULT-BRANCH-REQUIRED'
+
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+          lfs: false
+          persist-credentials: false
+          submodules: false
+
+      - name: Run token-free installation smoke
+        id: install_e2e
+        shell: powershell
+        run: ./tests/e2e/Invoke-OnGitHubHostedRunner.ps1
+
+      - name: Publish sanitized job summary
+        if: always()
+        shell: powershell
+        env:
+          OCES_E2E_OUTCOME: ${{ steps.install_e2e.outcome }}
+        run: |
+          $receiptValid = Test-Path -LiteralPath $env:OCES_E2E_RESULT -PathType Leaf
+          $receiptItem = $null
+          if ($receiptValid) {
+              $receiptItem = Get-Item -LiteralPath $env:OCES_E2E_RESULT -Force
+              $receiptValid = ($receiptItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+                  $receiptItem.Length -gt 0 -and $receiptItem.Length -le 64KB
+          }
+
+          $result = $null
+          if ($receiptValid) {
+              try {
+                  $result = Get-Content -LiteralPath $receiptItem.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+              }
+              catch {
+                  $receiptValid = $false
+              }
+          }
+
+          $targetVersion = ''
+          $installedVersion = ''
+          $safeErrorCode = 'E2E-RESULT-INVALID'
+          $testedCommit = ''
+          $installerExitCode = -1
+          $packageReceipt = 'False'
+          $slackPlugin = 'False'
+          $successEvidence = $false
+          $stageLines = @()
+          if ($receiptValid) {
+              $targetVersion = [string]$result.targetVersion
+              $installedVersion = [string]$result.installedVersion
+              $candidateErrorCode = [string]$result.errorCode
+              $testedCommit = ([string]$result.testedCommit).ToLowerInvariant()
+              $parsedExitCode = 0
+              $expectedStageIds = @('diagnose', 'node', 'download', 'integrity', 'dryRun', 'install', 'onboard', 'verify')
+              $expectedStageStatuses = @('Succeeded', 'Succeeded', 'Succeeded', 'Succeeded', 'Succeeded', 'Succeeded', 'Skipped', 'Skipped')
+              $stages = @($result.stages)
+
+              $receiptValid = [int]$result.schemaVersion -eq 1 -and
+                  $targetVersion -match '^\d{4}\.\d+\.\d+$' -and
+                  $testedCommit -match '^[0-9a-f]{40}$' -and
+                  $testedCommit -eq ([string]$env:OCES_E2E_EXPECTED_SHA).ToLowerInvariant() -and
+                  ($installedVersion -eq '' -or $installedVersion -match '^\d{4}\.\d+\.\d+$') -and
+                  ($candidateErrorCode -eq '' -or $candidateErrorCode -match '^(OCES|E2E)-[A-Z0-9-]{1,64}$') -and
+                  [int]::TryParse([string]$result.installerExitCode, [ref]$parsedExitCode) -and
+                  $parsedExitCode -ge -1 -and $parsedExitCode -le 255 -and
+                  $result.success -is [bool] -and
+                  $result.harnessCompleted -is [bool] -and
+                  $result.environmentVerified -is [bool] -and
+                  $result.credentialsScrubbed -is [bool] -and
+                  $result.installationSucceeded -is [bool] -and
+                  $result.provenanceReceiptValidated -is [bool] -and
+                  $result.slackPluginVerified -is [bool] -and
+                  $stages.Count -le $expectedStageIds.Count
+
+              $stagesMatchSuccess = $stages.Count -eq $expectedStageIds.Count
+              if ($receiptValid) {
+                  for ($index = 0; $index -lt $stages.Count; $index++) {
+                      $stageId = [string]$stages[$index].id
+                      $stageStatus = [string]$stages[$index].status
+                      if ($stageId -ne $expectedStageIds[$index] -or
+                          $stageStatus -notin @('Pending', 'Running', 'Succeeded', 'Failed', 'Skipped')) {
+                          $receiptValid = $false
+                          break
+                      }
+                      if ($stageStatus -ne $expectedStageStatuses[$index]) {
+                          $stagesMatchSuccess = $false
+                      }
+                      $stageLines += "| $stageId | $stageStatus |"
+                  }
+              }
+
+              if ($receiptValid) {
+                  $successEvidence = $installedVersion -eq $targetVersion -and
+                      $candidateErrorCode -eq '' -and
+                      $parsedExitCode -eq 0 -and
+                      $result.success -eq $true -and
+                      $result.harnessCompleted -eq $true -and
+                      $result.environmentVerified -eq $true -and
+                      $result.credentialsScrubbed -eq $true -and
+                      $result.installationSucceeded -eq $true -and
+                      $result.provenanceReceiptValidated -eq $true -and
+                      $result.slackPluginVerified -eq $true -and
+                      $stagesMatchSuccess
+                  $safeErrorCode = if ($candidateErrorCode -eq '') { '(none)' } else { $candidateErrorCode }
+                  $installerExitCode = $parsedExitCode
+                  $packageReceipt = if ($result.provenanceReceiptValidated -eq $true) { 'True' } else { 'False' }
+                  $slackPlugin = if ($result.slackPluginVerified -eq $true) { 'True' } else { 'False' }
+              }
+          }
+
+          $status = if ($env:OCES_E2E_OUTCOME -eq 'success' -and $receiptValid -and $successEvidence) { 'PASS' } else { 'FAIL' }
+          if (-not $receiptValid) {
+              $targetVersion = '(invalid receipt)'
+              $testedCommit = '(invalid receipt)'
+              $installedVersion = ''
+              $stageLines = @()
+          }
+          $lines = @(
+              '# Windows Install E2E',
+              '',
+              "- Result: $status",
+              "- Target version: $targetVersion",
+              "- Tested commit: $testedCommit",
+              "- Installed version: $installedVersion",
+              "- Installer exit code: $installerExitCode",
+              "- Safe error code: $safeErrorCode",
+              "- Package receipt: $packageReceipt",
+              "- Slack plugin: $slackPlugin",
+              '',
+              '| Stage | Status |',
+              '| --- | --- |'
+          )
+          $lines += $stageLines
+          $lines | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Append
+          if ($status -ne 'PASS') {
+              throw 'E2E-SUMMARY-FAIL-CLOSED'
+          }

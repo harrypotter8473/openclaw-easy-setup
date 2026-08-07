@@ -51,6 +51,9 @@
 - Provenance receipt schema v2 with a retained full-content digest, fast metadata-tree verification, always-hashed critical files, and full-digest fallback
 - Windows PowerShell 5.1-compatible UTF-8 stdin for official OpenClaw JSON patch commands
 - Disposable Windows Sandbox GUI and token-free install-smoke modes with a read-only source mapping and sanitized result receipt
+- Manual-only, token-free installation E2E on a disposable GitHub-hosted Windows runner
+- Minimal seven-file runner staging with before/after SHA-256 checks, a credential-scrubbed environment, trusted Windows PATH, and empty npm/Git user configuration
+- A shared install-smoke worker that binds `-Confirm:$false` inside PowerShell instead of passing it as a native string
 
 ### Security
 

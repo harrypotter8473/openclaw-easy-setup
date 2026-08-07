@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $launcherPath = Join-Path $projectRoot 'Start-OpenClawEasySetup.Sandbox.ps1'
 $sandboxEntryPoint = Join-Path $projectRoot 'tests\e2e\Invoke-InWindowsSandbox.ps1'
+$workerPath = Join-Path $projectRoot 'tests\e2e\Invoke-InstallSmokeWorker.ps1'
 $script:Passed = 0
 $script:Failed = 0
 
@@ -33,6 +34,9 @@ Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Name 'Sandbox host launc
 $parseErrors = $null
 $null = [Management.Automation.Language.Parser]::ParseFile($sandboxEntryPoint, [ref]$null, [ref]$parseErrors)
 Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Name 'In-sandbox E2E entry point parses as PowerShell'
+$parseErrors = $null
+$null = [Management.Automation.Language.Parser]::ParseFile($workerPath, [ref]$null, [ref]$parseErrors)
+Assert-Equal -Actual @($parseErrors).Count -Expected 0 -Name 'Shared install-smoke worker parses as PowerShell'
 
 $generatedRuns = New-Object Collections.Generic.List[object]
 try {
@@ -69,8 +73,9 @@ try {
     $stagedRelativePaths = @(Get-ChildItem -LiteralPath $guiGeneration.SourceStagingDirectory -File -Recurse | ForEach-Object {
         $_.FullName.Substring(([string]$guiGeneration.SourceStagingDirectory).TrimEnd('\').Length + 1)
     })
-    Assert-Equal -Actual $stagedRelativePaths.Count -Expected 15 -Name 'Source staging contains only the explicit runtime allowlist'
+    Assert-Equal -Actual $stagedRelativePaths.Count -Expected 16 -Name 'Source staging contains only the explicit runtime allowlist'
     Assert-True -Condition ($stagedRelativePaths -contains 'tests\e2e\Invoke-InWindowsSandbox.ps1') -Name 'Source staging includes the fixed Sandbox entry point'
+    Assert-True -Condition ($stagedRelativePaths -contains 'tests\e2e\Invoke-InstallSmokeWorker.ps1') -Name 'Source staging includes the shared Boolean-bound install worker'
     Assert-True -Condition ($stagedRelativePaths -notcontains '.git' -and $stagedRelativePaths -notcontains '.gitleaks.toml' -and $stagedRelativePaths -notcontains 'README.md') -Name 'Source staging excludes repository metadata and unrelated files'
 
     $smokeGeneration = & $launcherPath -Mode InstallSmoke -EnableClipboard -MemoryInMB 8192 -GenerateOnly
@@ -86,10 +91,12 @@ try {
     Assert-True -Condition ($launcherSource.Contains('[IO.FileMode]::CreateNew') -and $launcherSource.Contains('Start-Process -FilePath $sandboxExecutable')) -Name 'Host launcher creates configuration atomically and invokes the trusted Sandbox executable directly'
 
     $entrySource = [IO.File]::ReadAllText($sandboxEntryPoint, [Text.Encoding]::UTF8)
+    $workerSource = [IO.File]::ReadAllText($workerPath, [Text.Encoding]::UTF8)
     Assert-True -Condition ($entrySource.Contains('$accountName -ne ''WDAGUtilityAccount''')) -Name 'In-sandbox entry point refuses execution as the host user'
     Assert-True -Condition ($entrySource.Contains('E2E-SOURCE-MAPPING-WRITABLE') -and $entrySource.Contains('$result.sourceMappedReadOnly = $true')) -Name 'In-sandbox entry point verifies the source mapping is actually read-only'
     Assert-True -Condition ($entrySource.Contains("Get-Command openclaw -All") -and $entrySource.Contains('E2E-ENVIRONMENT-NOT-CLEAN')) -Name 'Actual install smoke requires a clean OpenClaw environment'
-    Assert-True -Condition ($entrySource.Contains("'-SkipOnboarding'")) -Name 'Automated install smoke never starts onboarding or accepts tokens'
+    Assert-True -Condition ($workerSource.Contains('-SkipOnboarding') -and $workerSource.Contains('-Confirm:$false')) -Name 'Automated install smoke skips token entry and binds confirmation as Boolean false'
+    Assert-True -Condition (-not $entrySource.Contains("'-Confirm:$false'")) -Name 'Sandbox native argument list never passes Boolean confirmation as text'
     $checkpointSelector = 'Where-Object { $_.BaseName -match ''^[A-Fa-f0-9]{32}$'' }'
     Assert-True -Condition ($entrySource.Contains($checkpointSelector)) -Name 'Result collection selects only installation checkpoint files'
     Assert-True -Condition ($entrySource.Contains('Read-OpenClawCheckpoint') -and $entrySource.Contains('E2E-CHECKPOINT-INVALID')) -Name 'Result collection validates checkpoint schema and fixed stages before export'

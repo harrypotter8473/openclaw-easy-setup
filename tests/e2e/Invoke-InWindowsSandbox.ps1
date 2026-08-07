@@ -236,13 +236,13 @@ try {
         $result.harnessCompleted = $true
     }
     else {
-        $entryPoint = Join-Path $appRoot 'OpenClawEasySetup.ps1'
+        $workerPath = Join-Path $appRoot 'tests\e2e\Invoke-InstallSmokeWorker.ps1'
         $standardOutputPath = Join-Path $runRoot 'install.stdout.txt'
         $standardErrorPath = Join-Path $runRoot 'install.stderr.txt'
         $process = Start-Process -FilePath $trustedPowerShell -ArgumentList @(
             '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-            '-File', ('"{0}"' -f $entryPoint),
-            '-Action', 'Install', '-Apply', '-SkipOnboarding', '-Confirm:$false',
+            '-File', ('"{0}"' -f $workerPath),
+            '-ProjectRoot', ('"{0}"' -f $appRoot),
             '-StateDirectory', ('"{0}"' -f $stateRoot)
         ) -RedirectStandardOutput $standardOutputPath -RedirectStandardError $standardErrorPath -Wait -PassThru
         $result.exitCode = [int]$process.ExitCode

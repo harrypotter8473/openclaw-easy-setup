@@ -67,10 +67,9 @@ if (-not $GenerateOnly) {
     $sandboxExecutable = Join-Path $env:SystemRoot 'System32\WindowsSandbox.exe'
     if (-not (Test-Path -LiteralPath $sandboxExecutable -PathType Leaf)) {
         throw @'
-Windows Sandbox is not enabled. This launcher does not enable Windows features automatically.
-Open an elevated PowerShell only after reviewing the change, run:
-Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All
-Then restart Windows if prompted and run this launcher again.
+Windows Sandbox is unavailable. This launcher does not enable or repair Windows features.
+Use the manual "Windows Install E2E" workflow in GitHub Actions instead.
+If a Sandbox reconnect warning repeats, close it and stop the local test.
 '@
     }
 }
@@ -102,6 +101,7 @@ $stagedFiles = @(
     'src\CredentialResolver\OpenClawEasySetup.SecretResolver.cs',
     'src\PackageIntegrity\OpenClawEasySetup.PackageTreeHasher.cs',
     'tests\e2e\Invoke-InWindowsSandbox.ps1',
+    'tests\e2e\Invoke-InstallSmokeWorker.ps1',
     'ui\MainWindow.xaml',
     'ui\SettingsWindow.xaml'
 )

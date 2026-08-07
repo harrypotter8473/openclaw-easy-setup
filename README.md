@@ -25,7 +25,7 @@ Windows 초보자가 OpenClaw를 안전하게 설치하고, 중단되더라도 �
 - Windows Credential Manager와 네이티브 SecretRef resolver를 이용한 비밀정보 저장
 - 공식 설정 스키마, dry-run, 설정 차이, 계획 지문을 확인한 뒤에만 적용하는 쉬운 설정 마법사
 - 로컬 loopback Gateway, 256-bit 인증 토큰, messaging 권한과 명시적 고위험 도구 차단
-- PowerShell 5.1 및 PowerShell 7 자동 테스트
+- PowerShell 5.1·7 CI와 GitHub 임시 Windows runner 설치 E2E
 
 ## 가장 쉬운 시작
 
@@ -55,18 +55,15 @@ GUI에서는 다음 작업을 선택할 수 있습니다.
 
 `Start-OpenClawEasySetup.cmd`의 실행 정책 우회는 해당 PowerShell 프로세스에만 적용되며 Windows의 영구 실행 정책을 변경하지 않습니다.
 
-## 이미 OpenClaw가 설치된 PC에서 시험하기
+## 기존 설치를 건드리지 않고 시험하기
 
-현재 설치를 건드리지 않고 화면과 계획만 확인하려면 `Diagnose`, `Plan`, `Install -Apply -WhatIf` 또는 두 GUI의 `-SmokeTest`를 사용할 수 있습니다. 실제 신규 설치를 시험하려면 Windows Sandbox 실행기를 사용하세요.
+현재 PC에서는 `Diagnose`, `Plan`, `Install -Apply -WhatIf`와 두 GUI의 `-SmokeTest`만 사용하세요. 이 경로는 다운로드·설치·설정 쓰기를 하지 않습니다.
 
-```powershell
-./Start-OpenClawEasySetup.Sandbox.ps1 -Mode Gui
-./Start-OpenClawEasySetup.Sandbox.ps1 -Mode InstallSmoke
-```
+자동 신규 설치 E2E의 기본 경로는 GitHub Actions의 일회성 Windows runner입니다. 이 워크플로 PR을 검토해 기본 브랜치에 병합한 뒤, 저장소의 `Actions` 탭에서 `Windows Install E2E`를 선택하고 `Run workflow`를 누르면 설치와 검증이 GitHub의 임시 머신에서만 실행됩니다. API 키나 메신저 토큰을 사용하지 않으며 사용자의 PC에서 Windows 기능·드라이버·가상화 설정을 바꾸거나 재부팅하지 않습니다.
 
-`Gui`는 새 Windows 화면에서 직접 눌러보는 모드이고, `InstallSmoke`는 온보딩과 토큰 입력 없이 본체·Slack 플러그인 설치를 자동 검사하는 모드입니다. 실행에 필요한 고정 파일만 별도 staging 폴더로 복사해 읽기 전용으로 연결하고 `.git`, 문서, 로컬 비밀 파일과 나머지 작업 폴더는 노출하지 않습니다. 실행별 결과 폴더에는 정제된 `result.json`만 기록합니다. Sandbox 창을 닫으면 내부 설치와 자격 증명은 모두 삭제됩니다. Windows Sandbox 기능은 자동으로 활성화하지 않습니다.
+화면 버튼과 입력 흐름을 확인하는 GUI 클릭 시험은 깨끗한 체크포인트가 있는 별도 Hyper-V Windows VM에서만 진행합니다. Windows Sandbox는 기본 시험 경로가 아닙니다. Sandbox 연결 경고가 다시 나타나거나 `다시 연결`이 반복되면 더 누르지 말고 창을 닫은 뒤 즉시 시험을 중단하세요. 이 프로젝트는 Sandbox나 Hyper-V 기능을 자동으로 활성화·복구하지 않습니다.
 
-기능 활성화 방법, 기존 설치의 공식 `--profile` 격리 시험, 결과 해석과 안전 경계는 [Windows Sandbox E2E 안내](docs/windows-sandbox-e2e.md)를 참고하세요.
+실행 방법과 결과 해석은 [GitHub 임시 Windows E2E 안내](docs/github-hosted-windows-e2e.md), 기존 설치의 공식 `--profile` 시험과 선택적 Sandbox 경계는 [격리 Windows 시험 안내](docs/windows-sandbox-e2e.md)를 참고하세요.
 
 ## 쉬운 설정 마법사
 
@@ -210,7 +207,7 @@ config/                     검토된 공식 출처와 런타임 요구사항
 locales/                    한국어 메시지
 tests/                      외부 의존성 없는 테스트
 docs/                       설계 결정과 로드맵
-.github/workflows/          Windows PowerShell 5.1/7 CI
+.github/workflows/          PowerShell CI와 임시 Windows 설치 E2E
 ```
 
 ## 다음 단계
