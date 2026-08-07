@@ -209,6 +209,7 @@ $moduleSourceText = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
 Assert-True -Condition (-not $moduleSourceText.Contains('NPM_CONFIG_FORCE')) -Name 'Installer does not enable npm force mode through NPM_CONFIG_FORCE'
 Assert-True -Condition ($moduleSourceText.Contains("OpenClaw-Easy-Setup/0.4")) -Name 'Installer network requests identify the current tool version'
 Assert-True -Condition ($moduleSourceText.Contains('GIT_CONFIG_NOSYSTEM') -and $moduleSourceText.Contains('GIT_CONFIG_GLOBAL')) -Name 'Installer isolates system and user Git configuration'
+Assert-True -Condition ($moduleSourceText.Contains('Set-OpenClawPrivatePathAcl -Path $emptyNpmUserConfig') -and $moduleSourceText.Contains('Set-OpenClawPrivatePathAcl -Path $emptyNpmGlobalConfig')) -Name 'Installer protects separate npm user and global configuration files'
 Assert-True -Condition ($moduleSourceText.Contains('uninstall --global openclaw --ignore-scripts')) -Name 'Exact-version repair disables package lifecycle scripts during removal'
 Assert-True -Condition ($moduleSourceText.Contains('$forceNestedConfirmation') -and $moduleSourceText.Contains('Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true')) -Name 'Explicit confirmation is preserved for nested onboarding changes'
 Assert-True -Condition ($moduleSourceText.Contains("@('plugins', 'install', `$installSpec, '--pin')")) -Name 'Slack plugin installation uses the exact official CLI pin flow'
@@ -465,9 +466,57 @@ try {
         } $InstallerPath $syntheticInstallerSource $trustedPowerShellPath
     }
 
-    [IO.File]::WriteAllText($syntheticInstallerPath, "param([switch]`$NoOnboard, [string]`$InstallMethod, [string]`$Tag, [switch]`$DryRun)`r`nWrite-Output 'synthetic installer output'`r`nexit 0`r`n", (New-Object Text.UTF8Encoding($false)))
-    $successfulInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)
-    Assert-True -Condition ($successfulInstallerResult.Count -eq 1 -and $successfulInstallerResult[0].GetType() -eq [int] -and $successfulInstallerResult[0] -eq 0) -Name 'Pinned installer wrapper returns only a scalar zero when the child writes output and succeeds'
+    $successfulInstallerScript = @'
+param([switch]$NoOnboard, [string]$InstallMethod, [string]$Tag, [switch]$DryRun)
+$userConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_USERCONFIG', 'Process')
+$globalConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process')
+if ([string]::IsNullOrWhiteSpace($userConfig) -or [string]::IsNullOrWhiteSpace($globalConfig)) {
+    exit 71
+}
+try {
+    $userConfigPath = [IO.Path]::GetFullPath($userConfig)
+    $globalConfigPath = [IO.Path]::GetFullPath($globalConfig)
+    $workingDirectory = [IO.Path]::GetFullPath((Get-Location).Path)
+    $userConfigItem = Get-Item -LiteralPath $userConfigPath -Force -ErrorAction Stop
+    $globalConfigItem = Get-Item -LiteralPath $globalConfigPath -Force -ErrorAction Stop
+}
+catch {
+    exit 72
+}
+if ([string]::Equals($userConfigPath, $globalConfigPath, [StringComparison]::OrdinalIgnoreCase)) {
+    exit 73
+}
+if (-not [string]::Equals((Split-Path -Parent $userConfigPath), $workingDirectory, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals((Split-Path -Parent $globalConfigPath), $workingDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+    exit 74
+}
+if ($userConfigItem.PSIsContainer -or $globalConfigItem.PSIsContainer -or
+    ($userConfigItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    ($globalConfigItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    $userConfigItem.Length -ne 0 -or $globalConfigItem.Length -ne 0) {
+    exit 75
+}
+Write-Output 'synthetic installer output'
+exit 0
+'@
+    [IO.File]::WriteAllText($syntheticInstallerPath, $successfulInstallerScript, (New-Object Text.UTF8Encoding($false)))
+    $savedCallerNpmUserConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_USERCONFIG', 'Process')
+    $savedCallerNpmGlobalConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process')
+    $callerNpmUserSentinel = 'caller-user-config-sentinel'
+    $callerNpmGlobalSentinel = 'caller-global-config-sentinel'
+    try {
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $callerNpmUserSentinel, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $callerNpmGlobalSentinel, 'Process')
+        $successfulInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)
+        $callerNpmConfigRestored = [string]::Equals([Environment]::GetEnvironmentVariable('NPM_CONFIG_USERCONFIG', 'Process'), $callerNpmUserSentinel, [StringComparison]::Ordinal) -and
+            [string]::Equals([Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process'), $callerNpmGlobalSentinel, [StringComparison]::Ordinal)
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $savedCallerNpmUserConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $savedCallerNpmGlobalConfig, 'Process')
+    }
+    Assert-True -Condition ($successfulInstallerResult.Count -eq 1 -and $successfulInstallerResult[0].GetType() -eq [int] -and $successfulInstallerResult[0] -eq 0) -Name 'Pinned installer wrapper isolates npm user and global config in distinct empty files and returns scalar success'
+    Assert-True -Condition $callerNpmConfigRestored -Name 'Pinned installer wrapper restores caller npm user and global config values'
 
     [IO.File]::WriteAllText($syntheticInstallerPath, "param([switch]`$NoOnboard, [string]`$InstallMethod, [string]`$Tag, [switch]`$DryRun)`r`nWrite-Output 'synthetic installer output'`r`nexit 23`r`n", (New-Object Text.UTF8Encoding($false)))
     $failedInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)

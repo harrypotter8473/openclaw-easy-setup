@@ -1901,15 +1901,18 @@ function Invoke-OpenClawPinnedInstallerFile {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         [void](Set-OpenClawPrivatePathAcl -Path $safeWorkingDirectory -Directory)
     }
-    $emptyNpmConfig = Join-Path $safeWorkingDirectory 'empty.npmrc'
+    $emptyNpmUserConfig = Join-Path $safeWorkingDirectory 'empty.user.npmrc'
+    $emptyNpmGlobalConfig = Join-Path $safeWorkingDirectory 'empty.global.npmrc'
     $emptyGitConfig = Join-Path $safeWorkingDirectory 'empty.gitconfig'
     $safeNpmCache = Join-Path $safeWorkingDirectory 'npm-cache'
     [void][IO.Directory]::CreateDirectory($safeNpmCache)
-    [IO.File]::WriteAllText($emptyNpmConfig, '', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($emptyNpmUserConfig, '', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($emptyNpmGlobalConfig, '', (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText($emptyGitConfig, '', (New-Object Text.UTF8Encoding($false)))
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         [void](Set-OpenClawPrivatePathAcl -Path $safeNpmCache -Directory)
-        [void](Set-OpenClawPrivatePathAcl -Path $emptyNpmConfig)
+        [void](Set-OpenClawPrivatePathAcl -Path $emptyNpmUserConfig)
+        [void](Set-OpenClawPrivatePathAcl -Path $emptyNpmGlobalConfig)
         [void](Set-OpenClawPrivatePathAcl -Path $emptyGitConfig)
     }
 
@@ -1940,8 +1943,8 @@ function Invoke-OpenClawPinnedInstallerFile {
         ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
         [Environment]::SetEnvironmentVariable('Path', ($safePath -join ';'), 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_REGISTRY', 'https://registry.npmjs.org/', 'Process')
-        [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $emptyNpmConfig, 'Process')
-        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $emptyNpmConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $emptyNpmUserConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $emptyNpmGlobalConfig, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_CACHE', $safeNpmCache, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFER_OFFLINE', 'false', 'Process')
         [Environment]::SetEnvironmentVariable('GIT_CONFIG_NOSYSTEM', '1', 'Process')
