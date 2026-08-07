@@ -145,6 +145,38 @@ function Resolve-OpenClawE2EHarnessErrorCode {
     return Get-OpenClawE2EUnknownHarnessCode -Phase $Phase
 }
 
+function Select-OpenClawE2ECheckpointErrorCode {
+    param(
+        [AllowEmptyString()]
+        [string]$CurrentCode = '',
+
+        [AllowEmptyString()]
+        [string]$CandidateCode = '',
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SafeCodes,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SpecificInstallCodes
+    )
+
+    $resolvedCode = Resolve-OpenClawE2EHarnessErrorCode `
+        -CandidateCode $CandidateCode `
+        -Phase 'checkpoint' `
+        -SafeCodes $SafeCodes
+
+    if ([string]::IsNullOrWhiteSpace($CurrentCode)) {
+        return $resolvedCode
+    }
+
+    if ([string]::Equals($CurrentCode, 'OCES-INSTALL-001', [StringComparison]::Ordinal) -and
+        $SpecificInstallCodes -ccontains $resolvedCode) {
+        return $resolvedCode
+    }
+
+    return $CurrentCode
+}
+
 function Get-OpenClawE2EPostconditionErrorCode {
     param(
         [Parameter(Mandatory = $true)]
@@ -166,6 +198,23 @@ function Get-OpenClawE2EPostconditionErrorCode {
         return 'E2E-SLACK-VERIFICATION-FAILED'
     }
     return 'E2E-POSTCONDITION-FAILED'
+}
+
+function Get-OpenClawE2EInstallFailureCode {
+    param(
+        [AllowEmptyString()]
+        [string]$Detail = ''
+    )
+
+    switch -CaseSensitive ($Detail) {
+        'Installer invocation failure.' { return 'E2E-INSTALL-INVOKE-FAILED' }
+        'Exit code 1' { return 'E2E-INSTALL-PINNED-INSTALLER-EXIT-1' }
+        'Exit code 2' { return 'E2E-INSTALL-PINNED-INSTALLER-EXIT-2' }
+        'Postcondition failure.' { return 'E2E-INSTALL-POSTCONDITION-FAILED' }
+        'Provenance receipt failure.' { return 'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED' }
+        'Slack plugin provenance or installation failure.' { return 'E2E-INSTALL-SLACK-PLUGIN-FAILED' }
+        default { return 'E2E-CHECKPOINT-STAGE-INSTALL-STATUS-MISMATCH' }
+    }
 }
 
 function Get-OpenClawE2ECheckpointMismatchCode {
@@ -199,6 +248,10 @@ function Get-OpenClawE2ECheckpointMismatchCode {
     }
     for ($index = 0; $index -lt $expectedStages.Count; $index++) {
         if ([string]$steps[$index].Status -ne $expectedStages[$index].status) {
+            if ([string]::Equals([string]$expectedStages[$index].id, 'install', [StringComparison]::Ordinal) -and
+                [string]::Equals([string]$steps[$index].Status, 'Failed', [StringComparison]::Ordinal)) {
+                return Get-OpenClawE2EInstallFailureCode -Detail ([string]$steps[$index].Detail)
+            }
             return [string]$expectedStages[$index].code
         }
     }
@@ -411,6 +464,15 @@ function Assert-OpenClawE2EStagedSource {
     }
 }
 
+$safeInstallFailureCodes = @(
+    'E2E-INSTALL-INVOKE-FAILED',
+    'E2E-INSTALL-PINNED-INSTALLER-EXIT-1',
+    'E2E-INSTALL-PINNED-INSTALLER-EXIT-2',
+    'E2E-INSTALL-POSTCONDITION-FAILED',
+    'E2E-INSTALL-PROVENANCE-RECEIPT-FAILED',
+    'E2E-INSTALL-SLACK-PLUGIN-FAILED'
+)
+
 $safeHarnessCodes = @(
     'E2E-ENVIRONMENT-NOT-GITHUB-HOSTED',
     'E2E-COMMIT-INVALID',
@@ -444,7 +506,7 @@ $safeHarnessCodes = @(
     'E2E-HARNESS-PROVENANCE-001',
     'E2E-HARNESS-SLACK-001',
     'E2E-HARNESS-POSTCONDITIONS-001'
-)
+) + $safeInstallFailureCodes
 
 try {
     if ($env:GITHUB_ACTIONS -ne 'true' -or
@@ -635,12 +697,12 @@ try {
     if ($null -ne $checkpointEvidence) {
         $result.stages = @($checkpointEvidence.Stages)
         $result.installationSucceeded = [bool]$checkpointEvidence.MatchesExpected
-        if (-not $result.installationSucceeded -and
-            [string]::IsNullOrWhiteSpace([string]$result.errorCode)) {
-            $result.errorCode = Resolve-OpenClawE2EHarnessErrorCode `
+        if (-not $result.installationSucceeded) {
+            $result.errorCode = Select-OpenClawE2ECheckpointErrorCode `
+                -CurrentCode ([string]$result.errorCode) `
                 -CandidateCode ([string]$checkpointEvidence.FailureCode) `
-                -Phase $harnessPhase `
-                -SafeCodes $safeHarnessCodes
+                -SafeCodes $safeHarnessCodes `
+                -SpecificInstallCodes $safeInstallFailureCodes
         }
     }
 
