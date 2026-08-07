@@ -224,6 +224,38 @@ Assert-True -Condition (-not $moduleSourceText.Contains('NPM_CONFIG_FORCE')) -Na
 Assert-True -Condition ($moduleSourceText.Contains("OpenClaw-Easy-Setup/0.4")) -Name 'Installer network requests identify the current tool version'
 Assert-True -Condition ($moduleSourceText.Contains('GIT_CONFIG_NOSYSTEM') -and $moduleSourceText.Contains('GIT_CONFIG_GLOBAL')) -Name 'Installer isolates system and user Git configuration'
 Assert-True -Condition ($moduleSourceText.Contains('Set-OpenClawPrivatePathAcl -Path $emptyNpmUserConfig') -and $moduleSourceText.Contains('Set-OpenClawPrivatePathAcl -Path $emptyNpmGlobalConfig')) -Name 'Installer protects separate npm user and global configuration files'
+Assert-True -Condition ($moduleSourceText.Contains("SetEnvironmentVariable('NPM_CONFIG_PREFIX', `$trustedNpmPrefix, 'Process')")) -Name 'Installer pins npm global writes to the trusted per-user command root'
+$installPostconditionEvidence = & $openClawModule {
+    $target = [version]'2026.7.1'
+    [pscustomobject]@{
+        Missing = Get-OpenClawInstallPostconditionDetail -Snapshot $null -TargetVersion $target
+        Ambiguous = Get-OpenClawInstallPostconditionDetail -Snapshot ([pscustomobject]@{ Found = $true; Ambiguous = $true; Trusted = $true; ExitCode = 0; Version = $target }) -TargetVersion $target
+        Untrusted = Get-OpenClawInstallPostconditionDetail -Snapshot ([pscustomobject]@{ Found = $true; Ambiguous = $false; Trusted = $false; ExitCode = 0; Version = $target }) -TargetVersion $target
+        Inspection = Get-OpenClawInstallPostconditionDetail -Snapshot ([pscustomobject]@{ Found = $true; Ambiguous = $false; Trusted = $true; ExitCode = 1; Version = $target }) -TargetVersion $target
+        VersionMissing = Get-OpenClawInstallPostconditionDetail -Snapshot ([pscustomobject]@{ Found = $true; Ambiguous = $false; Trusted = $true; ExitCode = 0; Version = $null }) -TargetVersion $target
+        VersionMismatch = Get-OpenClawInstallPostconditionDetail -Snapshot ([pscustomobject]@{ Found = $true; Ambiguous = $false; Trusted = $true; ExitCode = 0; Version = [version]'2026.7.2' }) -TargetVersion $target
+        Success = Get-OpenClawInstallPostconditionDetail -Snapshot ([pscustomobject]@{ Found = $true; Ambiguous = $false; Trusted = $true; ExitCode = 0; Version = $target }) -TargetVersion $target
+    }
+}
+$expectedInstallPostconditionDetails = @(
+    'OpenClaw command missing after installation.',
+    'OpenClaw command resolution ambiguous after installation.',
+    'OpenClaw command provenance failure after installation.',
+    'OpenClaw package inspection failure after installation.',
+    'OpenClaw version metadata missing after installation.',
+    'OpenClaw version mismatch after installation.',
+    ''
+)
+$actualInstallPostconditionDetails = @(
+    $installPostconditionEvidence.Missing,
+    $installPostconditionEvidence.Ambiguous,
+    $installPostconditionEvidence.Untrusted,
+    $installPostconditionEvidence.Inspection,
+    $installPostconditionEvidence.VersionMissing,
+    $installPostconditionEvidence.VersionMismatch,
+    $installPostconditionEvidence.Success
+)
+Assert-True -Condition (($actualInstallPostconditionDetails -join '|') -eq ($expectedInstallPostconditionDetails -join '|')) -Name 'Install postcondition diagnostics use only fixed predicate-specific details'
 Assert-True -Condition ($moduleSourceText.Contains('uninstall --global openclaw --ignore-scripts')) -Name 'Exact-version repair disables package lifecycle scripts during removal'
 Assert-True -Condition ($moduleSourceText.Contains('$forceNestedConfirmation') -and $moduleSourceText.Contains('Start-OpenClawOnboarding -StateDirectory $StateDirectory -Confirm:$true')) -Name 'Explicit confirmation is preserved for nested onboarding changes'
 Assert-True -Condition ($moduleSourceText.Contains("@('plugins', 'install', `$installSpec, '--pin')")) -Name 'Slack plugin installation uses the exact official CLI pin flow'
@@ -484,8 +516,13 @@ try {
 param([switch]$NoOnboard, [string]$InstallMethod, [string]$Tag, [switch]$DryRun)
 $userConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_USERCONFIG', 'Process')
 $globalConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process')
-if ([string]::IsNullOrWhiteSpace($userConfig) -or [string]::IsNullOrWhiteSpace($globalConfig)) {
+$globalPrefix = [Environment]::GetEnvironmentVariable('NPM_CONFIG_PREFIX', 'Process')
+if ([string]::IsNullOrWhiteSpace($userConfig) -or [string]::IsNullOrWhiteSpace($globalConfig) -or [string]::IsNullOrWhiteSpace($globalPrefix)) {
     exit 71
+}
+$expectedPrefix = [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'npm'))
+if (-not [string]::Equals([IO.Path]::GetFullPath($globalPrefix), $expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    exit 76
 }
 try {
     $userConfigPath = [IO.Path]::GetFullPath($userConfig)
@@ -516,21 +553,26 @@ exit 0
     [IO.File]::WriteAllText($syntheticInstallerPath, $successfulInstallerScript, (New-Object Text.UTF8Encoding($false)))
     $savedCallerNpmUserConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_USERCONFIG', 'Process')
     $savedCallerNpmGlobalConfig = [Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process')
+    $savedCallerNpmPrefix = [Environment]::GetEnvironmentVariable('NPM_CONFIG_PREFIX', 'Process')
     $callerNpmUserSentinel = 'caller-user-config-sentinel'
     $callerNpmGlobalSentinel = 'caller-global-config-sentinel'
+    $callerNpmPrefixSentinel = 'caller-prefix-sentinel'
     try {
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $callerNpmUserSentinel, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $callerNpmGlobalSentinel, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFIX', $callerNpmPrefixSentinel, 'Process')
         $successfulInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)
         $callerNpmConfigRestored = [string]::Equals([Environment]::GetEnvironmentVariable('NPM_CONFIG_USERCONFIG', 'Process'), $callerNpmUserSentinel, [StringComparison]::Ordinal) -and
-            [string]::Equals([Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process'), $callerNpmGlobalSentinel, [StringComparison]::Ordinal)
+            [string]::Equals([Environment]::GetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', 'Process'), $callerNpmGlobalSentinel, [StringComparison]::Ordinal) -and
+            [string]::Equals([Environment]::GetEnvironmentVariable('NPM_CONFIG_PREFIX', 'Process'), $callerNpmPrefixSentinel, [StringComparison]::Ordinal)
     }
     finally {
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_USERCONFIG', $savedCallerNpmUserConfig, 'Process')
         [Environment]::SetEnvironmentVariable('NPM_CONFIG_GLOBALCONFIG', $savedCallerNpmGlobalConfig, 'Process')
+        [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFIX', $savedCallerNpmPrefix, 'Process')
     }
-    Assert-True -Condition ($successfulInstallerResult.Count -eq 1 -and $successfulInstallerResult[0].GetType() -eq [int] -and $successfulInstallerResult[0] -eq 0) -Name 'Pinned installer wrapper isolates npm user and global config in distinct empty files and returns scalar success'
-    Assert-True -Condition $callerNpmConfigRestored -Name 'Pinned installer wrapper restores caller npm user and global config values'
+    Assert-True -Condition ($successfulInstallerResult.Count -eq 1 -and $successfulInstallerResult[0].GetType() -eq [int] -and $successfulInstallerResult[0] -eq 0) -Name 'Pinned installer wrapper isolates npm config, pins the trusted global prefix, and returns scalar success'
+    Assert-True -Condition $callerNpmConfigRestored -Name 'Pinned installer wrapper restores caller npm user, global, and prefix values'
 
     [IO.File]::WriteAllText($syntheticInstallerPath, "param([switch]`$NoOnboard, [string]`$InstallMethod, [string]`$Tag, [switch]`$DryRun)`r`nWrite-Output 'synthetic installer output'`r`nexit 23`r`n", (New-Object Text.UTF8Encoding($false)))
     $failedInstallerResult = @(& $invokeSyntheticInstaller $syntheticInstallerPath)
