@@ -32,6 +32,26 @@ function Assert-Parses {
     Assert-True -Condition (@($parseErrors).Count -eq 0) -Name $Name
 }
 
+function Get-OpenClawE2EFunctionSource {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Language.Ast]$Ast,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $matches = @($Ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst]
+    }, $true) | Where-Object {
+        [string]::Equals($_.Name, $Name, [StringComparison]::Ordinal)
+    })
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one controller function named $Name."
+    }
+    return $matches[0].Extent.Text
+}
 function Get-OpenClawE2ESummaryScript {
     param(
         [Parameter(Mandatory = $true)]
@@ -148,7 +168,14 @@ $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
 $controller = Get-Content -LiteralPath $controllerPath -Raw -Encoding UTF8
 $worker = Get-Content -LiteralPath $workerPath -Raw -Encoding UTF8
 $module = Get-Content -LiteralPath $modulePath -Raw -Encoding UTF8
-
+$controllerTokens = $null
+$controllerParseErrors = $null
+$controllerAst = [Management.Automation.Language.Parser]::ParseFile(
+    $controllerPath,
+    [ref]$controllerTokens,
+    [ref]$controllerParseErrors
+)
+Assert-True -Condition (@($controllerParseErrors).Count -eq 0) -Name 'Controller AST is available for isolated resolver tests'
 Assert-True -Condition ($workflow -match '(?m)^\s{2}workflow_dispatch:\s*$') -Name 'Install E2E is manually dispatched'
 Assert-True -Condition ($workflow -notmatch '(?m)^\s{2}(push|pull_request|schedule):') -Name 'Install E2E never runs automatically on repository events'
 Assert-True -Condition ($workflow -match '(?ms)^permissions:\s*\r?\n\s{2}contents:\s*read\s*$') -Name 'Workflow has read-only repository permissions'
@@ -179,6 +206,40 @@ Assert-True -Condition ($controller.Contains('Get-OpenClawSlackPluginInspection'
 Assert-True -Condition ($module.Contains('''Get-OpenClawSlackPluginInspection''')) -Name 'The ordered Slack inspection contract is exported for E2E verification'
 Assert-True -Condition ($controller.Contains('E2E-RESULT-PERSISTENCE-FAILED') -and $controller.Contains('-not $resultWritten')) -Name 'Missing result persistence fails the E2E run closed'
 Assert-True -Condition ($controller.Contains('if ($result.installerExitCode -eq 0)') -and $controller.Contains('$checkpointEvidence = $null')) -Name 'Installer failures preserve their safe code when checkpoint evidence is unavailable'
+Assert-True -Condition ($controller.Contains("throw 'E2E-CHECKPOINT-INVALID'") -and $controller.Contains('Resolve-OpenClawE2EHarnessErrorCode')) -Name 'Successful installer checkpoint exceptions become a fixed safe code'
+Assert-True -Condition ($controller.Contains('Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)')) -Name 'Controller prints only the safe numeric installer exit code'
+Assert-True -Condition ($controller -notmatch 'ScriptStackTrace|PositionMessage|InvocationInfo|Write-Host\s+\$_') -Name 'Controller never emits raw exception diagnostics'
+
+$unknownHarnessSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2EUnknownHarnessCode'
+$resolveHarnessSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Resolve-OpenClawE2EHarnessErrorCode'
+$resolverCaseSource = @(
+    '$safeCodes = @(''E2E-CHECKPOINT-INVALID'')',
+    '$phases = @(''preflight'', ''paths'', ''source'', ''environment'', ''installer'', ''checkpoint'', ''provenance'', ''slack'', ''postconditions'')',
+    '[pscustomobject]@{',
+    '    PhaseCodes = @($phases | ForEach-Object { Get-OpenClawE2EUnknownHarnessCode -Phase $_ })',
+    '    UnknownPhase = Get-OpenClawE2EUnknownHarnessCode -Phase ''CHECKPOINT''',
+    '    MaliciousPhase = Get-OpenClawE2EUnknownHarnessCode -Phase (''checkpoint'' + [Environment]::NewLine + ''C:\Users\runneradmin\secret'')',
+    '    ExactSafe = Resolve-OpenClawE2EHarnessErrorCode -CandidateCode ''E2E-CHECKPOINT-INVALID'' -Phase ''checkpoint'' -SafeCodes $safeCodes',
+    '    WrongCase = Resolve-OpenClawE2EHarnessErrorCode -CandidateCode ''e2e-checkpoint-invalid'' -Phase ''checkpoint'' -SafeCodes $safeCodes',
+    '    MaliciousCandidate = Resolve-OpenClawE2EHarnessErrorCode -CandidateCode (''E2E-CHECKPOINT-INVALID'' + [Environment]::NewLine + ''- injected'') -Phase ''checkpoint'' -SafeCodes $safeCodes',
+    '}'
+) -join [Environment]::NewLine
+$resolverTestSource = $unknownHarnessSource + [Environment]::NewLine + $resolveHarnessSource + [Environment]::NewLine + $resolverCaseSource
+$resolverEvidence = & ([scriptblock]::Create($resolverTestSource))
+$expectedPhaseCodes = @(
+    'E2E-HARNESS-PREFLIGHT-001',
+    'E2E-HARNESS-PATHS-001',
+    'E2E-HARNESS-SOURCE-001',
+    'E2E-HARNESS-ENVIRONMENT-001',
+    'E2E-HARNESS-INSTALLER-001',
+    'E2E-HARNESS-CHECKPOINT-001',
+    'E2E-HARNESS-PROVENANCE-001',
+    'E2E-HARNESS-SLACK-001',
+    'E2E-HARNESS-POSTCONDITIONS-001'
+)
+Assert-True -Condition (($resolverEvidence.PhaseCodes -join ',') -eq ($expectedPhaseCodes -join ',')) -Name 'Every internal harness phase maps to a fixed safe code'
+Assert-True -Condition ($resolverEvidence.UnknownPhase -eq 'E2E-HARNESS-001' -and $resolverEvidence.MaliciousPhase -eq 'E2E-HARNESS-001') -Name 'Unknown or malformed harness phases become the generic code'
+Assert-True -Condition ($resolverEvidence.ExactSafe -eq 'E2E-CHECKPOINT-INVALID' -and $resolverEvidence.WrongCase -eq 'E2E-HARNESS-CHECKPOINT-001' -and $resolverEvidence.MaliciousCandidate -eq 'E2E-HARNESS-CHECKPOINT-001') -Name 'Harness resolver preserves only exact allowlisted codes and never reflects exception text'
 
 Assert-True -Condition ($worker.Contains('-SkipOnboarding') -and $worker.Contains('-Confirm:$false')) -Name 'Worker skips token entry and binds noninteractive confirmation as a Boolean'
 Assert-True -Condition ($worker.Contains('& $entryPoint') -and -not $controller.Contains('-Confirm:$false')) -Name 'Worker evaluates confirmation inside PowerShell instead of a native argument string'
@@ -275,6 +336,13 @@ $maliciousCommitReceipt['testedCommit'] = $testedCommit + "`n- injected"
 $maliciousCommitCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $maliciousCommitReceipt -ControllerOutcome success -ExpectedCommit $testedCommit
 Assert-True -Condition ($maliciousCommitCase.Threw -and $maliciousCommitCase.Summary.Contains('(invalid receipt)') -and -not $maliciousCommitCase.Summary.Contains('injected')) -Name 'Invalid commit text cannot inject Markdown into the summary'
 
+$maliciousErrorReceipt = [ordered]@{}
+foreach ($key in $failureReceipt.Keys) {
+    $maliciousErrorReceipt[$key] = $failureReceipt[$key]
+}
+$maliciousErrorReceipt['errorCode'] = 'E2E-HARNESS-CHECKPOINT-001' + [Environment]::NewLine + '- injected'
+$maliciousErrorCase = Invoke-OpenClawE2ESummaryCase -SummaryScript $summaryScript -Receipt $maliciousErrorReceipt -ControllerOutcome failure -ExpectedCommit $testedCommit
+Assert-True -Condition ($maliciousErrorCase.Threw -and $maliciousErrorCase.Summary.Contains('(invalid receipt)') -and -not $maliciousErrorCase.Summary.Contains('injected')) -Name 'Invalid harness error text cannot inject Markdown into the summary'
 
 Write-Host ''
 Write-Host ("GitHub runner E2E contract tests: {0} passed, {1} failed" -f $script:Passed, $script:Failed)
