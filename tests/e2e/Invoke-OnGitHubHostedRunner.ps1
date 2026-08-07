@@ -166,10 +166,15 @@ function Get-OpenClawE2ECheckpointEvidence {
         throw 'E2E-CHECKPOINT-INVALID'
     }
 
-    $checkpoint = Read-OpenClawCheckpoint `
-        -Path $checkpointFiles[0].FullName `
-        -ExpectedTargetVersion $ExpectedTargetVersion `
-        -ExpectedSourceFingerprint $ExpectedSourceFingerprint
+    try {
+        $checkpoint = Read-OpenClawCheckpoint `
+            -Path $checkpointFiles[0].FullName `
+            -ExpectedTargetVersion $ExpectedTargetVersion `
+            -ExpectedSourceFingerprint $ExpectedSourceFingerprint
+    }
+    catch {
+        throw 'E2E-CHECKPOINT-INVALID'
+    }
     $expectedStages = @(
         [pscustomobject]@{ id = 'diagnose'; status = 'Succeeded' }
         [pscustomobject]@{ id = 'node'; status = 'Succeeded' }
@@ -202,7 +207,7 @@ function Get-OpenClawE2ECheckpointEvidence {
 
     return [pscustomobject]@{
         MatchesExpected = $matchesExpected
-        Stages = @($safeStages)
+        Stages = $safeStages.ToArray()
     }
 }
 
@@ -570,7 +575,7 @@ try {
     }
     catch {
         if ($result.installerExitCode -eq 0) {
-            throw 'E2E-CHECKPOINT-INVALID'
+            throw
         }
     }
     if ($null -ne $checkpointEvidence) {
