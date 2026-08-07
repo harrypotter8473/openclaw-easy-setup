@@ -1317,10 +1317,40 @@ function Update-OpenClawProcessPath {
     [CmdletBinding()]
     param()
 
-    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $segments = @($env:Path, $machinePath, $userPath) -join ';'
-    $env:Path = @($segments.Split(';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) -join ';'
+    $segments = New-Object System.Collections.Generic.List[string]
+    foreach ($segment in @(([string]$env:Path).Split(';'))) {
+        if (-not [string]::IsNullOrWhiteSpace($segment)) {
+            $segments.Add($segment)
+        }
+    }
+
+    $approvedRefreshCandidates = @(
+        $(if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) { Join-Path $env:ProgramFiles 'Git\cmd' }),
+        $(if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) { Join-Path ${env:ProgramFiles(x86)} 'Git\cmd' }),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd' }),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) { Join-Path $env:ProgramFiles 'nodejs' }),
+        $(if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) { Join-Path ${env:ProgramFiles(x86)} 'nodejs' }),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { Join-Path $env:LOCALAPPDATA 'Programs\nodejs' }),
+        $(if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) { Join-Path $env:APPDATA 'npm' })
+    )
+    foreach ($candidate in $approvedRefreshCandidates) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate) -or
+            -not (Test-Path -LiteralPath $candidate -PathType Container)) {
+            continue
+        }
+        try {
+            $fullPath = [IO.Path]::GetFullPath([string]$candidate)
+            $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                $segments.Add($fullPath)
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    $env:Path = @($segments | Select-Object -Unique) -join ';'
 }
 
 function Resolve-OpenClawInvocation {

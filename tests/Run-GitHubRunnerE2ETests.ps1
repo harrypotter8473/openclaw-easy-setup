@@ -209,6 +209,124 @@ Assert-True -Condition ($controller.Contains('if ($result.installerExitCode -eq 
 Assert-True -Condition ($controller.Contains("throw 'E2E-CHECKPOINT-INVALID'") -and $controller.Contains('Stages = $safeStages.ToArray()') -and -not $controller.Contains('Stages = @($safeStages)')) -Name 'Checkpoint reads fail safely and PowerShell 5.1 materializes stage evidence explicitly'
 Assert-True -Condition ($controller.Contains('Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)')) -Name 'Controller prints only the safe numeric installer exit code'
 Assert-True -Condition ($controller -notmatch 'ScriptStackTrace|PositionMessage|InvocationInfo|Write-Host\s+\$_') -Name 'Controller never emits raw exception diagnostics'
+$moduleTokens = $null
+$moduleParseErrors = $null
+$moduleAst = [Management.Automation.Language.Parser]::ParseFile(
+    $modulePath,
+    [ref]$moduleTokens,
+    [ref]$moduleParseErrors
+)
+Assert-True -Condition (@($moduleParseErrors).Count -eq 0) -Name 'Module AST is available for isolated PATH refresh tests'
+Assert-True -Condition ($module.Contains('$approvedRefreshCandidates') -and
+    -not $module.Contains("GetEnvironmentVariable('Path', 'Machine')") -and
+    -not $module.Contains("GetEnvironmentVariable('Path', 'User')")) -Name 'PATH refresh never reimports unrestricted persistent PATH values'
+
+$pathUpdateSource = Get-OpenClawE2EFunctionSource -Ast $moduleAst -Name 'Update-OpenClawProcessPath'
+$pathContainedSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Test-OpenClawE2EPathContainedBy'
+$pathAssertSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Assert-OpenClawE2EExpandedPath'
+$pathCaseSource = @(
+    'param([string]$CaseRoot)',
+    $pathUpdateSource,
+    $pathContainedSource,
+    $pathAssertSource,
+    '$environmentNames = @(''Path'', ''ProgramFiles'', ''ProgramFiles(x86)'', ''LOCALAPPDATA'', ''APPDATA'')',
+    '$savedEnvironment = @{}',
+    'foreach ($name in $environmentNames) {',
+    '    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)',
+    '}',
+    '$safePaths = @()',
+    '$expectedPaths = @()',
+    '$safeCode = ''''',
+    '$toolcacheCode = ''''',
+    '$blockedCode = ''''',
+    'try {',
+    '    $safeCurrentPath = Join-Path $CaseRoot ''safe-current''',
+    '    $programFiles = Join-Path $CaseRoot ''ProgramFiles''',
+    '    $programFilesX86 = Join-Path $CaseRoot ''ProgramFilesX86''',
+    '    $localAppData = Join-Path $CaseRoot ''LocalAppData''',
+    '    $appData = Join-Path $CaseRoot ''AppData''',
+    '    $workspaceRoot = Join-Path $CaseRoot ''workspace''',
+    '    $runnerTemp = Join-Path $CaseRoot ''runner-temp''',
+    '    $runnerToolCache = Join-Path $CaseRoot ''runner-toolcache''',
+    '    $expectedPaths = @(',
+    '        $safeCurrentPath,',
+    '        (Join-Path $programFiles ''Git\cmd''),',
+    '        (Join-Path $programFilesX86 ''Git\cmd''),',
+    '        (Join-Path $localAppData ''Programs\Git\cmd''),',
+    '        (Join-Path $programFiles ''nodejs''),',
+    '        (Join-Path $programFilesX86 ''nodejs''),',
+    '        (Join-Path $localAppData ''Programs\nodejs''),',
+    '        (Join-Path $appData ''npm'')',
+    '    )',
+    '    foreach ($directoryPath in @($expectedPaths + @($workspaceRoot, $runnerTemp, $runnerToolCache))) {',
+    '        [void][IO.Directory]::CreateDirectory($directoryPath)',
+    '    }',
+    '    [Environment]::SetEnvironmentVariable(''Path'', $safeCurrentPath, [EnvironmentVariableTarget]::Process)',
+    '    [Environment]::SetEnvironmentVariable(''ProgramFiles'', $programFiles, [EnvironmentVariableTarget]::Process)',
+    '    [Environment]::SetEnvironmentVariable(''ProgramFiles(x86)'', $programFilesX86, [EnvironmentVariableTarget]::Process)',
+    '    [Environment]::SetEnvironmentVariable(''LOCALAPPDATA'', $localAppData, [EnvironmentVariableTarget]::Process)',
+    '    [Environment]::SetEnvironmentVariable(''APPDATA'', $appData, [EnvironmentVariableTarget]::Process)',
+    '    Update-OpenClawProcessPath',
+    '    $safePaths = @(([string]$env:Path).Split('';'') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })',
+    '    try {',
+    '        Assert-OpenClawE2EExpandedPath -BlockedRoots @($workspaceRoot, $runnerTemp, $runnerToolCache)',
+    '    }',
+    '    catch {',
+    '        $safeCode = [string]$_.Exception.Message',
+    '    }',
+    '    $env:Path = ''C:\hostedtoolcache\windows\Python\3.12.0\x64''',
+    '    try {',
+    '        Assert-OpenClawE2EExpandedPath -BlockedRoots @($workspaceRoot, $runnerTemp, $runnerToolCache)',
+    '    }',
+    '    catch {',
+    '        $toolcacheCode = [string]$_.Exception.Message',
+    '    }',
+    '    $env:Path = Join-Path $workspaceRoot ''child''',
+    '    try {',
+    '        Assert-OpenClawE2EExpandedPath -BlockedRoots @($workspaceRoot, $runnerTemp, $runnerToolCache)',
+    '    }',
+    '    catch {',
+    '        $blockedCode = [string]$_.Exception.Message',
+    '    }',
+    '}',
+    'finally {',
+    '    foreach ($name in $environmentNames) {',
+    '        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], [EnvironmentVariableTarget]::Process)',
+    '    }',
+    '}',
+    '[pscustomobject]@{',
+    '    ExpectedPaths = @($expectedPaths)',
+    '    SafePaths = @($safePaths)',
+    '    SafeCode = $safeCode',
+    '    ToolcacheCode = $toolcacheCode',
+    '    BlockedCode = $blockedCode',
+    '}'
+) -join [Environment]::NewLine
+$pathCaseRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('OpenClawE2EPathTest-' + [guid]::NewGuid().ToString('N'))))
+$pathTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$pathEvidence = $null
+$pathEvidenceException = $null
+try {
+    [void][IO.Directory]::CreateDirectory($pathCaseRoot)
+    try {
+        $pathEvidence = & ([scriptblock]::Create($pathCaseSource)) $pathCaseRoot
+    }
+    catch {
+        $pathEvidenceException = $_.Exception
+    }
+}
+finally {
+    if ([IO.Directory]::Exists($pathCaseRoot) -and $pathCaseRoot.StartsWith($pathTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [IO.Directory]::Delete($pathCaseRoot, $true)
+    }
+}
+$pathEvidenceValid = $null -eq $pathEvidenceException -and $null -ne $pathEvidence
+Assert-True -Condition ($pathEvidenceValid -and
+    [string]::IsNullOrWhiteSpace([string]$pathEvidence.SafeCode) -and
+    [string]::Equals((@($pathEvidence.ExpectedPaths) -join ';'), (@($pathEvidence.SafePaths) -join ';'), [StringComparison]::OrdinalIgnoreCase)) -Name 'Production PATH refresh remains inside the E2E allowlist on PowerShell 5.1'
+Assert-True -Condition ($pathEvidenceValid -and $pathEvidence.ToolcacheCode -eq 'E2E-PATH-EXPANSION-INVALID') -Name 'Expanded PATH guard still rejects hosted toolcache paths'
+Assert-True -Condition ($pathEvidenceValid -and $pathEvidence.BlockedCode -eq 'E2E-PATH-EXPANSION-INVALID') -Name 'Expanded PATH guard still rejects paths inside mutable runner roots'
+
 
 $unknownHarnessSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2EUnknownHarnessCode'
 $resolveHarnessSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Resolve-OpenClawE2EHarnessErrorCode'
