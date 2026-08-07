@@ -206,7 +206,7 @@ Assert-True -Condition ($controller.Contains('Get-OpenClawSlackPluginInspection'
 Assert-True -Condition ($module.Contains('''Get-OpenClawSlackPluginInspection''')) -Name 'The ordered Slack inspection contract is exported for E2E verification'
 Assert-True -Condition ($controller.Contains('E2E-RESULT-PERSISTENCE-FAILED') -and $controller.Contains('-not $resultWritten')) -Name 'Missing result persistence fails the E2E run closed'
 Assert-True -Condition ($controller.Contains('if ($result.installerExitCode -eq 0)') -and $controller.Contains('$checkpointEvidence = $null')) -Name 'Installer failures preserve their safe code when checkpoint evidence is unavailable'
-Assert-True -Condition ($controller.Contains("throw 'E2E-CHECKPOINT-INVALID'") -and $controller.Contains('Resolve-OpenClawE2EHarnessErrorCode')) -Name 'Successful installer checkpoint exceptions become a fixed safe code'
+Assert-True -Condition ($controller.Contains("throw 'E2E-CHECKPOINT-INVALID'") -and $controller.Contains('Stages = $safeStages.ToArray()') -and -not $controller.Contains('Stages = @($safeStages)')) -Name 'Checkpoint reads fail safely and PowerShell 5.1 materializes stage evidence explicitly'
 Assert-True -Condition ($controller.Contains('Write-Host ("Installer exit code: {0}" -f $result.installerExitCode)')) -Name 'Controller prints only the safe numeric installer exit code'
 Assert-True -Condition ($controller -notmatch 'ScriptStackTrace|PositionMessage|InvocationInfo|Write-Host\s+\$_') -Name 'Controller never emits raw exception diagnostics'
 
@@ -266,6 +266,37 @@ $successfulStages = @(
         }
     }
 )
+$checkpointEvidenceSource = Get-OpenClawE2EFunctionSource -Ast $controllerAst -Name 'Get-OpenClawE2ECheckpointEvidence'
+$checkpointCaseSource = @(
+    'param([string]$StateRootValue, [object[]]$StepsValue)',
+    $checkpointEvidenceSource,
+    'function Read-OpenClawCheckpoint {',
+    '    param([string]$Path, [string]$ExpectedTargetVersion, [string]$ExpectedSourceFingerprint)',
+    '    return [pscustomobject]@{ Status = ''Completed''; Steps = @($StepsValue) }',
+    '}',
+    'Get-OpenClawE2ECheckpointEvidence -StateRoot $StateRootValue -ExpectedTargetVersion ''2026.7.1'' -ExpectedSourceFingerprint (''A'' * 64)'
+) -join [Environment]::NewLine
+$checkpointCaseRoot = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('OpenClawE2ECheckpointTest-' + [guid]::NewGuid().ToString('N'))))
+$checkpointTempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+$checkpointEvidence = $null
+$checkpointEvidenceException = $null
+try {
+    $checkpointStatePath = Join-Path $checkpointCaseRoot 'State'
+    [void][IO.Directory]::CreateDirectory($checkpointStatePath)
+    [IO.File]::WriteAllText((Join-Path $checkpointStatePath (('a' * 32) + '.json')), '{}', (New-Object Text.UTF8Encoding($false)))
+    try {
+        $checkpointEvidence = & ([scriptblock]::Create($checkpointCaseSource)) $checkpointCaseRoot $successfulStages
+    }
+    catch {
+        $checkpointEvidenceException = $_.Exception
+    }
+}
+finally {
+    if ([IO.Directory]::Exists($checkpointCaseRoot) -and $checkpointCaseRoot.StartsWith($checkpointTempPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [IO.Directory]::Delete($checkpointCaseRoot, $true)
+    }
+}
+Assert-True -Condition ($null -eq $checkpointEvidenceException -and $null -ne $checkpointEvidence -and @($checkpointEvidence.Stages).Count -eq 8 -and $checkpointEvidence.MatchesExpected) -Name 'PowerShell 5.1 returns all eight checkpoint stages without Generic List conversion failure'
 $successReceipt = [ordered]@{
     schemaVersion = 1
     success = $true
