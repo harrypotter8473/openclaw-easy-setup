@@ -6,7 +6,7 @@
 
 - Initial Windows PowerShell setup engine
 - Read-only environment diagnosis and install planning
-- Release-, commit-, and SHA-256-pinned installer download with size and syntax validation
+- Independently pinned release source and official installer commits, plus SHA-256, size, and syntax validation
 - Sanitized installer dry-run before any package installation
 - Exact WinGet package provisioning for the recommended Node.js 26 prerequisite
 - Exact WinGet provisioning and Authenticode validation for Git for Windows

@@ -5,7 +5,7 @@
 - [x] Windows/PowerShell/CPU/디스크/Git/Node/OpenClaw 진단
 - [x] 설치 계획 미리보기
 - [x] HTTPS 호스트 및 리디렉션 허용 목록
-- [x] 릴리스·커밋·SHA-256 고정 및 Authenticode 상태 확인
+- [x] 릴리스·패키지 소스 커밋·설치 스크립트 커밋·SHA-256 분리 고정 및 Authenticode 상태 확인
 - [x] 설치 스크립트 크기·문법 검증과 dry-run
 - [x] WinGet exact 패키지와 버전을 이용한 Node.js 자동 준비
 - [x] 고정된 Git for Windows 준비와 공식 설치기의 비고정 Git 다운로드 차단

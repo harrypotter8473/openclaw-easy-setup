@@ -130,7 +130,7 @@
     "nodeTitle": "필요한 경우 고정된 Git·Node.js 준비",
     "nodeDetail": "WinGet으로 Git {0} {1}(SHA-256 {2})과 Node.js {3} {4}(SHA-256 {5})을 사용합니다.",
     "downloadTitle": "고정된 공식 설치 파일 다운로드",
-    "downloadDetail": "릴리스 {0}, 커밋 {1}; 허용된 HTTPS 호스트: {2}",
+    "downloadDetail": "릴리스 {0}, 소스 커밋 {1}, 설치 스크립트 커밋 {2}; 허용된 HTTPS 호스트: {3}",
     "integrityTitle": "크기·PowerShell 문법·SHA-256 검증",
     "integrityDetail": "예상 SHA-256: {0}",
     "dryRunTitle": "공식 설치 파일 미리 실행 검사",

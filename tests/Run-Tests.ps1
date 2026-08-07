@@ -68,8 +68,8 @@ $recommendedNode26 = Test-OpenClawNodeVersion -Version ([version]'26.0.0')
 Assert-True -Condition ($recommendedNode26.Supported -and $recommendedNode26.Recommended) -Name 'Node 26 is supported and recommended'
 
 $config = Get-OpenClawSourceConfig
-Assert-Equal -Actual $config.schemaVersion -Expected 1 -Name 'Source configuration schema is supported'
-Assert-Equal -Actual $config.reviewedOn -Expected '2026-08-03' -Name 'Reviewed source metadata records the current security review date'
+Assert-Equal -Actual $config.schemaVersion -Expected 2 -Name 'Source configuration schema is supported'
+Assert-Equal -Actual $config.reviewedOn -Expected '2026-08-07' -Name 'Reviewed source metadata records the current security review date'
 $recoveryToolVersion = & $openClawModule { $script:RecoveryToolVersion }
 Assert-Equal -Actual $recoveryToolVersion -Expected '0.4.0' -Name 'Recovery and checkpoint metadata uses the current tool version'
 $officialUri = [uri]$config.installer.uri
@@ -80,7 +80,13 @@ Assert-True -Condition (-not (Test-OpenClawUriAllowed -Uri ([uri]'https://user:p
 Assert-True -Condition (-not (Test-OpenClawUriAllowed -Uri ([uri]'https://raw.githubusercontent.com:8443/openclaw/install.ps1') -AllowedHosts @($config.allowedDownloadHosts))) -Name 'Non-default HTTPS ports are rejected'
 Assert-True -Condition (-not (Test-OpenClawUriAllowed -Uri ([uri]'https://raw.githubusercontent.com/openclaw/install.ps1?token=test') -AllowedHosts @($config.allowedDownloadHosts))) -Name 'Installer query strings are rejected'
 Assert-True -Condition ([string]$config.openClaw.commitSha -match '^[A-Fa-f0-9]{40}$') -Name 'OpenClaw source is pinned to a commit SHA'
+Assert-Equal -Actual $config.openClaw.commitSha -Expected '2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4' -Name 'OpenClaw package remains pinned to the reviewed release commit'
+Assert-True -Condition ([string]$config.installer.commitSha -match '^[A-Fa-f0-9]{40}$') -Name 'Official installer source is pinned to a commit SHA'
+Assert-Equal -Actual $config.installer.commitSha -Expected 'f355f6afbb824e394d52045c67f850cc03470f3b' -Name 'Official installer uses the reviewed PowerShell 5.1 SQLite probe fix'
+Assert-True -Condition (-not [string]::Equals([string]$config.openClaw.commitSha, [string]$config.installer.commitSha, [StringComparison]::OrdinalIgnoreCase)) -Name 'Current package and installer reviews are pinned independently'
+Assert-Equal -Actual $officialUri.AbsoluteUri -Expected ("https://raw.githubusercontent.com/openclaw/openclaw/{0}/scripts/install.ps1" -f $config.installer.commitSha) -Name 'Official installer URI is derived from its separate pinned commit'
 Assert-True -Condition ([string]$config.installer.sha256 -match '^[A-Fa-f0-9]{64}$') -Name 'Installer is pinned to a SHA-256'
+Assert-Equal -Actual ([string]$config.installer.sha256).ToUpperInvariant() -Expected '730F7EA6F1823DE76F9E5EA1670FDED33582E69B9447AB0FB9E0369C6EA45D53' -Name 'Official PowerShell installer content hash matches the reviewed fix'
 Assert-Equal -Actual $config.node.winget.id -Expected 'OpenJS.NodeJS' -Name 'Node.js WinGet package uses the exact official package ID'
 Assert-Equal -Actual $config.node.winget.version -Expected '26.5.1' -Name 'Node.js WinGet package is version-pinned'
 Assert-True -Condition ([string]$config.node.winget.installerSha256 -match '^[A-Fa-f0-9]{64}$') -Name 'Node.js installer hash is recorded'
@@ -176,11 +182,19 @@ $plan = @(Get-OpenClawInstallPlan)
 Assert-Equal -Actual $plan.Count -Expected 8 -Name 'Install plan has eight explicit stages'
 Assert-True -Condition (@($plan | Where-Object ChangesPC -eq $true).Count -ge 3) -Name 'Mutating install stages are labeled'
 Assert-True -Condition (@($plan | Where-Object { $null -eq $_.RequiresAdmin }).Count -eq 0) -Name 'Every install stage declares its admin requirement'
+$downloadPlan = @($plan | Where-Object Id -eq 'download')
+Assert-True -Condition ($downloadPlan.Count -eq 1 -and
+    [string]$downloadPlan[0].Detail -match [regex]::Escape([string]$config.openClaw.commitSha) -and
+    [string]$downloadPlan[0].Detail -match [regex]::Escape([string]$config.installer.commitSha)) -Name 'Install plan distinguishes the package and installer commits'
 
 $readiness = @(Get-OpenClawReadiness)
 Assert-True -Condition ($readiness.Count -ge 10) -Name 'Readiness returns the expected checks'
 Assert-True -Condition (@($readiness | Where-Object Id -eq 'git').Count -eq 1) -Name 'Readiness includes the trusted Git prerequisite check'
 Assert-True -Condition (@($readiness | Where-Object Status -notin @('Pass', 'Warn', 'Fail', 'Info')).Count -eq 0) -Name 'Readiness statuses use the documented set'
+$installerSourceReadiness = @($readiness | Where-Object Id -eq 'installerSource')
+Assert-True -Condition ($installerSourceReadiness.Count -eq 1 -and
+    [string]$installerSourceReadiness[0].Current -match [regex]::Escape([string]$config.openClaw.commitSha) -and
+    [string]$installerSourceReadiness[0].Current -match [regex]::Escape([string]$config.installer.commitSha)) -Name 'Readiness distinguishes the package and installer commits'
 
 $powerShellFiles = Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object {
     $_.Extension -in @('.ps1', '.psm1') -and
@@ -655,13 +669,22 @@ exit 0
         '2 verbose exit 0',
         '3 info ok'
     ) -ReturnEvidence
+    $contradictorySuccessEvidence = & $invokeNpmFailureClassifier -Lines @(
+        '0 verbose title npm install openclaw@2026.7.1',
+        '1 error code ECUSTOM',
+        '2 error command failed',
+        '3 verbose exit 0',
+        '4 info ok'
+    ) -ReturnEvidence
     Assert-True -Condition ($missingDirectoryEvidence.DiagnosticStage -eq 'Unavailable' -and
         $emptyDirectoryEvidence.DiagnosticStage -eq 'Unavailable' -and
         $invalidFileEvidence.DiagnosticStage -eq 'FileRejected' -and
         $missingInstallLogEvidence.DiagnosticStage -eq 'InstallLogMissingOrAmbiguous' -and
         $unclassifiedEvidence.DiagnosticStage -eq 'EvidenceUnclassified' -and
         [string]::IsNullOrWhiteSpace($successfulEvidence.Detail) -and
-        [string]::IsNullOrWhiteSpace($successfulEvidence.DiagnosticStage)) -Name 'Npm diagnostic stages distinguish unavailable, rejected, ambiguous, unclassified, and successful evidence'
+        [string]::IsNullOrWhiteSpace($successfulEvidence.DiagnosticStage) -and
+        [string]::IsNullOrWhiteSpace($contradictorySuccessEvidence.Detail) -and
+        $contradictorySuccessEvidence.DiagnosticStage -eq 'EvidenceUnclassified') -Name 'Npm diagnostic stages distinguish unavailable, rejected, ambiguous, contradictory, and successful evidence'
     Assert-True -Condition ($missingDirectoryEvidence.DiagnosticStage -ne 'PRESEEDED') -Name 'Npm diagnostic stage output is reset before classification'
 
     $numericLifecycleDetail = & $invokeNpmFailureClassifier -Lines @(
@@ -861,6 +884,71 @@ exit 1
 
     $sourceFingerprint = 'A' * 64
     $checkpoint = New-OpenClawCheckpoint -StateDirectory $exactTemporaryTestRoot -TargetVersion ([string]$config.openClaw.version) -SourceFingerprint $sourceFingerprint
+
+    $sourceConfigFixtureRoot = Join-Path $exactTemporaryTestRoot 'source-config-fixtures'
+    [void][IO.Directory]::CreateDirectory($sourceConfigFixtureRoot)
+    $sourceConfigJson = Get-Content -LiteralPath (Join-Path $projectRoot 'config\openclaw-source.json') -Raw -Encoding UTF8
+    $sourceConfigFixtureEncoding = New-Object Text.UTF8Encoding($false)
+    $writeSourceConfigFixture = {
+        param([object]$Data, [string]$Name)
+        $fixturePath = Join-Path $sourceConfigFixtureRoot $Name
+        [IO.File]::WriteAllText($fixturePath, ($Data | ConvertTo-Json -Depth 10), $sourceConfigFixtureEncoding)
+        return $fixturePath
+    }
+
+    $missingSchemaConfig = $sourceConfigJson | ConvertFrom-Json
+    $missingSchemaConfig.PSObject.Properties.Remove('schemaVersion')
+    $missingSchemaPath = & $writeSourceConfigFixture $missingSchemaConfig 'source-config-missing-schema.json'
+    Assert-True -Condition ($null -ne (Get-ThrownException {
+        Get-OpenClawSourceConfig -Path $missingSchemaPath
+    })) -Name 'Source configuration rejects a missing schema version'
+
+    foreach ($unsupportedSchemaVersion in @(1, 2.5)) {
+        $unsupportedSchemaConfig = $sourceConfigJson | ConvertFrom-Json
+        $unsupportedSchemaConfig.schemaVersion = $unsupportedSchemaVersion
+        $unsupportedSchemaPath = & $writeSourceConfigFixture $unsupportedSchemaConfig ("source-config-unsupported-schema-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+        Assert-True -Condition ($null -ne (Get-ThrownException {
+            Get-OpenClawSourceConfig -Path $unsupportedSchemaPath
+        })) -Name 'Source configuration rejects legacy or non-integer schema versions'
+    }
+
+    $missingInstallerCommitConfig = $sourceConfigJson | ConvertFrom-Json
+    $missingInstallerCommitConfig.installer.PSObject.Properties.Remove('commitSha')
+    $missingInstallerCommitPath = & $writeSourceConfigFixture $missingInstallerCommitConfig 'source-config-missing-installer-commit.json'
+    Assert-True -Condition ($null -ne (Get-ThrownException {
+        Get-OpenClawSourceConfig -Path $missingInstallerCommitPath
+    })) -Name 'Source configuration rejects a missing installer commit'
+
+    foreach ($invalidInstallerCommit in @('', (('f' * 39) -join ''), (('f' * 41) -join ''), (('g' * 40) -join ''))) {
+        $invalidInstallerCommitConfig = $sourceConfigJson | ConvertFrom-Json
+        $invalidInstallerCommitConfig.installer.commitSha = $invalidInstallerCommit
+        $invalidInstallerCommitPath = & $writeSourceConfigFixture $invalidInstallerCommitConfig ("source-config-invalid-installer-commit-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+        Assert-True -Condition ($null -ne (Get-ThrownException {
+            Get-OpenClawSourceConfig -Path $invalidInstallerCommitPath
+        })) -Name 'Source configuration rejects malformed installer commits'
+    }
+
+    $mismatchedInstallerCommitConfig = $sourceConfigJson | ConvertFrom-Json
+    $mismatchedInstallerCommitConfig.installer.commitSha = (('a' * 40) -join '')
+    $mismatchedInstallerCommitPath = & $writeSourceConfigFixture $mismatchedInstallerCommitConfig 'source-config-mismatched-installer-commit.json'
+    Assert-True -Condition ($null -ne (Get-ThrownException {
+        Get-OpenClawSourceConfig -Path $mismatchedInstallerCommitPath
+    })) -Name 'Source configuration rejects an installer URI that does not match installer.commitSha'
+
+    $releaseCommitInstallerUriConfig = $sourceConfigJson | ConvertFrom-Json
+    $releaseCommitInstallerUriConfig.installer.uri = "https://raw.githubusercontent.com/openclaw/openclaw/{0}/scripts/install.ps1" -f $releaseCommitInstallerUriConfig.openClaw.commitSha
+    $releaseCommitInstallerUriPath = & $writeSourceConfigFixture $releaseCommitInstallerUriConfig 'source-config-release-commit-installer-uri.json'
+    Assert-True -Condition ($null -ne (Get-ThrownException {
+        Get-OpenClawSourceConfig -Path $releaseCommitInstallerUriPath
+    })) -Name 'Source configuration does not silently derive the installer URI from the package commit'
+
+    $caseChangedInstallerUriConfig = $sourceConfigJson | ConvertFrom-Json
+    $caseChangedInstallerUriConfig.installer.uri = ([string]$caseChangedInstallerUriConfig.installer.uri).ToUpperInvariant()
+    $caseChangedInstallerUriPath = & $writeSourceConfigFixture $caseChangedInstallerUriConfig 'source-config-case-changed-installer-uri.json'
+    Assert-True -Condition ($null -ne (Get-ThrownException {
+        Get-OpenClawSourceConfig -Path $caseChangedInstallerUriPath
+    })) -Name 'Source configuration requires an ordinal-exact installer URI'
+
     Assert-True -Condition (Test-Path -LiteralPath $checkpoint.Path -PathType Leaf) -Name 'Checkpoint creation writes a state file'
     Assert-Equal -Actual $checkpoint.Steps.Count -Expected 8 -Name 'Checkpoint contains every install stage'
     Assert-Equal -Actual ($checkpoint.Steps.Id -join ',') -Expected 'diagnose,node,download,integrity,dryRun,install,onboard,verify' -Name 'Checkpoint stages use the stable ordered IDs'
@@ -1190,6 +1278,16 @@ exit 1
         }
     }
     Assert-True -Condition $bundleJsonValid -Name 'Every diagnostic bundle JSON payload is parseable'
+    $versionsEvidence = $bundleContents['versions.json'] | ConvertFrom-Json
+    Assert-Equal -Actual $versionsEvidence.targetOpenClawCommit -Expected $config.openClaw.commitSha -Name 'Diagnostic bundle records the reviewed OpenClaw package commit'
+    Assert-Equal -Actual $versionsEvidence.targetInstallerCommit -Expected $config.installer.commitSha -Name 'Diagnostic bundle records the separate reviewed installer commit'
+    Assert-Equal -Actual $versionsEvidence.installerSha256 -Expected ([string]$config.installer.sha256).ToUpperInvariant() -Name 'Diagnostic bundle records the reviewed installer content hash'
+    $parsedReadinessEvidence = $bundleContents['readiness.json'] | ConvertFrom-Json
+    $readinessEvidence = @($parsedReadinessEvidence)
+    $pinnedSourceEvidence = @($readinessEvidence | Where-Object id -eq 'pinnedSource')
+    Assert-True -Condition ($pinnedSourceEvidence.Count -eq 1 -and
+        [string]$pinnedSourceEvidence[0].current -match [regex]::Escape([string]$config.openClaw.commitSha) -and
+        [string]$pinnedSourceEvidence[0].current -match [regex]::Escape([string]$config.installer.commitSha)) -Name 'Offline readiness distinguishes the package and installer commits'
     $allBundleText = @($bundleContents.Values) -join [Environment]::NewLine
     Assert-True -Condition (-not $allBundleText.Contains($syntheticToken)) -Name 'Diagnostic bundle excludes synthetic token values'
     Assert-True -Condition (-not $allBundleText.Contains('?token=')) -Name 'Diagnostic bundle excludes URI query secrets'

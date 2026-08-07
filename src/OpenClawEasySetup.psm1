@@ -41,7 +41,7 @@ function Get-OpenClawSourceConfig {
     }
 
     $config = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($config.schemaVersion -ne 1) {
+    if ($config.schemaVersion -ne 2) {
         throw "Unsupported source configuration schema: $($config.schemaVersion)"
     }
 
@@ -51,6 +51,10 @@ function Get-OpenClawSourceConfig {
 
     if ([string]$config.openClaw.commitSha -notmatch '^[A-Fa-f0-9]{40}$') {
         throw 'The source configuration does not contain a pinned 40-character OpenClaw commit SHA.'
+    }
+
+    if ([string]$config.installer.commitSha -notmatch '^[A-Fa-f0-9]{40}$') {
+        throw 'The source configuration does not contain a pinned 40-character installer commit SHA.'
     }
 
     if ([string]$config.openClaw.version -notmatch '^\d{4}\.\d+\.\d+$') {
@@ -71,9 +75,9 @@ function Get-OpenClawSourceConfig {
         throw 'The source configuration does not contain a valid exact official Slack plugin pin.'
     }
 
-    $expectedInstallerUri = "https://raw.githubusercontent.com/openclaw/openclaw/{0}/scripts/install.ps1" -f $config.openClaw.commitSha
-    if ([string]$config.installer.uri -ne $expectedInstallerUri) {
-        throw 'The installer URI is not pinned to the configured OpenClaw commit and script path.'
+    $expectedInstallerUri = "https://raw.githubusercontent.com/openclaw/openclaw/{0}/scripts/install.ps1" -f $config.installer.commitSha
+    if (-not [string]::Equals([string]$config.installer.uri, $expectedInstallerUri, [StringComparison]::Ordinal)) {
+        throw 'The installer URI is not pinned to the configured installer commit and script path.'
     }
 
     if ([string]$config.installer.sha256 -notmatch '^[A-Fa-f0-9]{64}$') {
@@ -916,7 +920,7 @@ function Get-OpenClawReadiness {
         $sourceConfig = Get-OpenClawSourceConfig
         $installerUri = [uri]$sourceConfig.installer.uri
         $sourceAllowed = Test-OpenClawUriAllowed -Uri $installerUri -AllowedHosts @($sourceConfig.allowedDownloadHosts)
-        $checks.Add((New-OpenClawReadinessCheck -Id 'installerSource' -Status $(if ($sourceAllowed) { 'Pass' } else { 'Fail' }) -Current ("{0} @ {1}" -f $sourceConfig.openClaw.releaseTag, $sourceConfig.openClaw.commitSha) -Required 'Pinned release, commit, URI, and SHA-256' -Guidance 'Review config/openclaw-source.json before downloading anything.'))
+        $checks.Add((New-OpenClawReadinessCheck -Id 'installerSource' -Status $(if ($sourceAllowed) { 'Pass' } else { 'Fail' }) -Current ("{0} @ {1}; installer @ {2}" -f $sourceConfig.openClaw.releaseTag, $sourceConfig.openClaw.commitSha, $sourceConfig.installer.commitSha) -Required 'Pinned release, source commit, installer commit, URI, and SHA-256' -Guidance 'Review config/openclaw-source.json before downloading anything.'))
     }
     catch {
         $checks.Add((New-OpenClawReadinessCheck -Id 'installerSource' -Status 'Fail' -Current $_.Exception.Message -Required 'Valid source configuration' -Guidance 'Repair config/openclaw-source.json.'))
@@ -1051,7 +1055,7 @@ function Get-OpenClawInstallPlan {
     @(
         [pscustomobject]@{ Order = 1; Id = 'diagnose'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.diagnoseTitle; Detail = $messages.planSteps.diagnoseDetail }
         [pscustomobject]@{ Order = 2; Id = 'node'; ChangesPC = $true; RequiresAdmin = 'MayPrompt'; Title = $messages.planSteps.nodeTitle; Detail = ([string]$messages.planSteps.nodeDetail -f $config.git.winget.id, $config.git.winget.version, $config.git.winget.installerSha256, $config.node.winget.id, $config.node.winget.version, $config.node.winget.installerSha256) }
-        [pscustomobject]@{ Order = 3; Id = 'download'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.downloadTitle; Detail = ([string]$messages.planSteps.downloadDetail -f $config.openClaw.releaseTag, $config.openClaw.commitSha, (@($config.allowedDownloadHosts) -join ', ')) }
+        [pscustomobject]@{ Order = 3; Id = 'download'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.downloadTitle; Detail = ([string]$messages.planSteps.downloadDetail -f $config.openClaw.releaseTag, $config.openClaw.commitSha, $config.installer.commitSha, (@($config.allowedDownloadHosts) -join ', ')) }
         [pscustomobject]@{ Order = 4; Id = 'integrity'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.integrityTitle; Detail = ([string]$messages.planSteps.integrityDetail -f $config.installer.sha256) }
         [pscustomobject]@{ Order = 5; Id = 'dryRun'; ChangesPC = $false; RequiresAdmin = $false; Title = $messages.planSteps.dryRunTitle; Detail = ([string]$messages.planSteps.dryRunDetail -f $config.installer.installMethod, $config.openClaw.version) }
         [pscustomobject]@{ Order = 6; Id = 'install'; ChangesPC = $true; RequiresAdmin = $false; Title = $messages.planSteps.installTitle; Detail = ([string]$messages.planSteps.installDetail -f $config.slackPlugin.installSpec) }
